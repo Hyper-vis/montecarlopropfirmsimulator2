@@ -1,0 +1,62 @@
+{
+  "2530a60bf8984ac9962c9c9138c6971e": {
+    "strategy_id": "2530a60bf8984ac9962c9c9138c6971e",
+    "filename": "MultiBot_-_2.3_CBOT_MINI_YM1!_2026-02-24 (1).csv",
+    "path": "strategies\\2530a60bf8984ac9962c9c9138c6971e.csv",
+    "uploaded_at": "2026-03-07T18:29:34.917509+00:00"
+  },
+  "5dff6ca0004a4957a1a3d9b3f2184703": {
+    "strategy_id": "5dff6ca0004a4957a1a3d9b3f2184703",
+    "filename": "MultiBot_-_2.3_CBOT_MINI_YM1!_2026-02-24.csv",
+    "path": "strategies\\5dff6ca0004a4957a1a3d9b3f2184703.csv",
+    "uploaded_at": "2026-03-07T18:31:48.660403+00:00"
+  },
+  "da9a0b9c0f5a421ebdae9f276a3540e4": {
+    "strategy_id": "da9a0b9c0f5a421ebdae9f276a3540e4",
+    "filename": "MultiBot_-_2.3_CME_MINI_ES1!_2026-03-01 (1).csv",
+    "path": "strategies\\da9a0b9c0f5a421ebdae9f276a3540e4.csv",
+    "uploaded_at": "2026-03-07T18:31:54.014068+00:00"
+  },
+  "89a921c57a8b4e4a9057c1a8fc2e6ed6": {
+    "strategy_id": "89a921c57a8b4e4a9057c1a8fc2e6ed6",
+    "filename": "MultiBot_-_2.3_CME_MINI_ES1!_2026-03-01.csv",
+    "path": "strategies\\89a921c57a8b4e4a9057c1a8fc2e6ed6.csv",
+    "uploaded_at": "2026-03-07T18:31:58.805632+00:00"
+  },
+  "13bfab9e65574435b361c5fbab33f225": {
+    "strategy_id": "13bfab9e65574435b361c5fbab33f225",
+    "filename": "MultiBot_-_2.3_CME_MINI_ES1!_2026-02-24 (1).csv",
+    "path": "strategies\\13bfab9e65574435b361c5fbab33f225.csv",
+    "uploaded_at": "2026-03-07T18:32:16.028479+00:00"
+  },
+  "656f0d90e7b44742aaedb53667358bfa": {
+    "strategy_id": "656f0d90e7b44742aaedb53667358bfa",
+    "filename": "MultiBot_-_2.3_CBOT_MINI_YM1!_2026-02-24.csv",
+    "path": "strategies\\656f0d90e7b44742aaedb53667358bfa.csv",
+    "uploaded_at": "2026-03-07T19:41:32.990941+00:00"
+  },
+  "8e38c97f4b314e31892dbd4cfbbad415": {
+    "strategy_id": "8e38c97f4b314e31892dbd4cfbbad415",
+    "filename": "MultiBot_-_2.3_CBOT_MINI_YM1!_2026-02-24 (1).csv",
+    "path": "strategies\\8e38c97f4b314e31892dbd4cfbbad415.csv",
+    "uploaded_at": "2026-03-07T19:51:42.998776+00:00"
+  },
+  "e332134ab5cb4f87ad7f868305559842": {
+    "strategy_id": "e332134ab5cb4f87ad7f868305559842",
+    "filename": "MultiBot_-_2.3_CBOT_MINI_YM1!_2026-02-24.csv",
+    "path": "strategies\\e332134ab5cb4f87ad7f868305559842.csv",
+    "uploaded_at": "2026-03-07T19:51:43.017114+00:00"
+  },
+  "fe1ff569df0948489fdd8a972282424a": {
+    "strategy_id": "fe1ff569df0948489fdd8a972282424a",
+    "filename": "MultiBot_-_2.3_CME_MINI_ES1!_2026-02-24 (1).csv",
+    "path": "strategies\\fe1ff569df0948489fdd8a972282424a.csv",
+    "uploaded_at": "2026-03-07T19:51:43.044611+00:00"
+  },
+  "0ad011abaf4e4ba78279bf120a2f3aa9": {
+    "strategy_id": "0ad011abaf4e4ba78279bf120a2f3aa9",
+    "filename": "MultiBot_-_2.3_CME_MINI_ES1!_2026-03-01 (1).csv",
+    "path": "strategies\\0ad011abaf4e4ba78279bf120a2f3aa9.csv",
+    "uploaded_at": "2026-03-07T19:51:43.068997+00:00"
+  }
+}
