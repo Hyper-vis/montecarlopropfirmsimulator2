@@ -146,15 +146,31 @@ def _inject_recency(
     max_days: int,
     stop_at_payout: bool,
     seed: Optional[int],
+    csv_path: Optional[str] = None,
 ) -> dict:
     """Run a secondary Monte Carlo on the recent trade window and return
     the recency block to be merged into a simulation result dict.
+
+    When *csv_path* is provided the recency window is built from the last
+    N_RECENT_TRADES individual trade rows (the preferred approach, since it
+    is trade-count-normalised rather than calendar-day-normalised).
+    Falls back to the day-based approach when csv_path is not available.
 
     Uses at most half of *n_sims* (minimum 1 000) for the recent run so that
     overall response time stays well below 2× the primary run.
     """
     n_recent = max(1_000, n_sims // 2)
     try:
+        if csv_path is not None:
+            return _ra.run_recency_simulation_from_trades(
+                csv_path            = csv_path,
+                overall_payout_prob = overall_prob,
+                lookback_days       = _ra.RECENCY_LOOKBACK_DAYS,
+                n_sims              = n_recent,
+                max_days            = max_days,
+                stop_at_payout      = stop_at_payout,
+                seed                = seed,
+            )
         return _ra.run_recency_simulation_from_pnl(
             full_pnl            = full_pnl,
             overall_payout_prob = overall_prob,
@@ -174,7 +190,9 @@ def _inject_recency(
             "recency_comment":          "Recency analysis unavailable.",
             "recent_window_size":       None,
             "recent_n_trades":          None,
-            "full_n_trades":            len(full_pnl),
+            "full_n_trades":            None,
+            "recent_n_days":            None,
+            "full_n_days":              len(full_pnl),
         }
 
 
@@ -256,7 +274,7 @@ def analyze_until_payout(
 
     from apex_engine_v3_1 import load_daily_pnl as _load_pnl
     full_pnl = _load_pnl(csv_path)
-    recency  = _inject_recency(full_pnl, raw["payout_prob"], n_sims, max_days, True, seed)
+    recency  = _inject_recency(full_pnl, raw["payout_prob"], n_sims, max_days, True, seed, csv_path=csv_path)
 
     return {
         "metadata": raw["metadata"],
@@ -340,7 +358,7 @@ def analyze_full_period(
 
     from apex_engine_v3_1 import load_daily_pnl as _load_pnl
     full_pnl = _load_pnl(csv_path)
-    recency  = _inject_recency(full_pnl, raw["payout_prob"], n_sims, max_days, False, seed)
+    recency  = _inject_recency(full_pnl, raw["payout_prob"], n_sims, max_days, False, seed, csv_path=csv_path)
 
     return {
         "metadata": raw["metadata"],
@@ -436,6 +454,7 @@ def run_batch(
                         max_days       = 90,
                         stop_at_payout = True,
                         seed           = None,
+                        csv_path       = csv_path,
                     )
                     row["recent_pass_probability"] = _rec["recent_pass_probability"]
                     row["probability_delta"]       = _rec["probability_delta"]
@@ -765,7 +784,7 @@ def analyze_rescue(
             n_pay = int((payout_amts > 0).sum())
             n_blow = int(is_blow.sum())
             n_time = n_sims - n_pay - n_blow
-            results.append({
+            row: dict = {
                 "csv":                  csv_path,
                 "n_sims":              n_sims,
                 "pass_probability":    round(n_pay / n_sims, 4),
@@ -777,7 +796,25 @@ def analyze_rescue(
                 "distance_to_stop":    distance_to_stop,
                 "current_balance":     float(current_balance),
                 "trailing_stop_floor": float(trailing_stop_floor),
-            })
+            }
+            # Inject recency metrics (same recent-window analysis as batch)
+            try:
+                _rec = _inject_recency(
+                    pool,
+                    overall_prob   = row["pass_probability"],
+                    n_sims         = max(1_000, n_sims // 2),
+                    max_days       = max_days,
+                    stop_at_payout = True,
+                    seed           = seed,
+                    csv_path       = csv_path,
+                )
+                row["recent_pass_probability"] = _rec["recent_pass_probability"]
+                row["probability_delta"]       = _rec["probability_delta"]
+                row["recency_status"]          = _rec["recency_status"]
+                row["recent_window_size"]      = _rec["recent_window_size"]
+            except Exception:
+                pass  # recency failure must never break rescue results
+            results.append(row)
         except Exception as exc:
             results.append({"csv": csv_path, "error": str(exc)})
 

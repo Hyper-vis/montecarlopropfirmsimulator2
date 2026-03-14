@@ -29,6 +29,7 @@ modification of any existing engine file.
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 
 from apex_engine_v3_1 import (
     load_daily_pnl,
@@ -40,8 +41,10 @@ from apex_engine_v3_1 import (
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
 
-PRIMARY_WINDOW  = 50    # preferred recent window
-FALLBACK_WINDOW = 30    # used when fewer than PRIMARY_WINDOW trades exist
+PRIMARY_WINDOW   = 50    # preferred recent window (trading days, legacy fallback)
+FALLBACK_WINDOW  = 30    # used when fewer than PRIMARY_WINDOW days exist (legacy)
+RECENCY_LOOKBACK_DAYS = 30   # calendar-day window for date-anchored recency
+MIN_TRADES_WARNING    = 10   # warn when fewer than this many trades are in window
 
 # Thresholds for status classification
 IMPROVING_THRESHOLD  =  0.10   # delta >= +0.10  → Improving
@@ -67,6 +70,71 @@ def select_window_size(n_trades: int) -> int:
     if n_trades >= FALLBACK_WINDOW:
         return FALLBACK_WINDOW
     return n_trades   # full dataset — window equals the entire history
+
+
+def load_trades_df(csv_path: str) -> pd.DataFrame:
+    """Load all individual trade rows from a CSV, sorted chronologically.
+
+    Returns a DataFrame with at least 'Date and time' and 'Net P&L USD' columns.
+    """
+    df = pd.read_csv(csv_path)
+    df.columns = df.columns.str.strip()
+    mask = df["Type"].str.strip() == "Trade"
+    if mask.sum() == 0:
+        mask = df["Type"].str.strip().str.startswith("Exit")
+    df = df[mask].copy()
+    df["Date and time"] = pd.to_datetime(df["Date and time"])
+    return df.sort_values("Date and time").reset_index(drop=True)
+
+
+def get_recent_trades_as_daily_pnl(
+    csv_path: str,
+    lookback_days: int = RECENCY_LOOKBACK_DAYS,
+) -> tuple:
+    """Load trades from the last *lookback_days* calendar days and aggregate
+    to daily PnL.
+
+    The window is anchored to the most-recent trade date in the CSV, so
+    strategies with different backtest end-dates are handled correctly.
+
+    Returns
+    -------
+    (daily_pnl, n_recent_trades, n_active_days, full_n_trades, full_n_days,
+     low_sample_warning)
+        daily_pnl         : np.ndarray — aggregated PnL per calendar day
+        n_recent_trades   : int        — individual trade rows in window
+        n_active_days     : int        — distinct trading days in window
+        full_n_trades     : int        — total individual trades in CSV
+        full_n_days       : int        — distinct calendar days in full history
+        low_sample_warning: bool       — True when n_recent_trades < MIN_TRADES_WARNING
+    """
+    df             = load_trades_df(csv_path)
+    full_n_trades  = len(df)
+    df["Date"]     = df["Date and time"].dt.date
+    full_n_days    = df["Date"].nunique()
+
+    latest         = df["Date and time"].max()
+    cutoff         = latest - pd.Timedelta(days=lookback_days)
+    recent         = df[df["Date and time"] > cutoff].copy()
+
+    # Fallback: if the window is empty (e.g. very sparse CSV), use the
+    # most-recent MIN_TRADES_WARNING trades so we always return something.
+    if len(recent) == 0:
+        recent = df.tail(MIN_TRADES_WARNING).copy()
+
+    n_recent_trades    = len(recent)
+    daily              = recent.groupby("Date")["Net P&L USD"].sum()
+    n_active_days      = len(daily)
+    low_sample_warning = n_recent_trades < MIN_TRADES_WARNING
+
+    return (
+        daily.values.astype(float),
+        n_recent_trades,
+        n_active_days,
+        full_n_trades,
+        full_n_days,
+        low_sample_warning,
+    )
 
 
 def get_recent_trade_subset(
@@ -177,8 +245,8 @@ def run_recency_simulation(
         recency_status           : str    — "Improving" | "Stable" | "Weakening"
         recency_comment          : str    — plain-English interpretation
         recent_window_size       : int    — actual recent window used
-        recent_n_trades          : int    — number of trades in subset
-        full_n_trades            : int    — total trades available in CSV
+        recent_n_days            : int    — number of trading days in subset
+        full_n_days              : int    — total trading days available in CSV
     """
     # Load full trade history
     full_pnl = load_daily_pnl(csv_path)
@@ -212,8 +280,76 @@ def run_recency_simulation(
         "recency_status":           comment["status"],
         "recency_comment":          comment["comment"],
         "recent_window_size":       window,
-        "recent_n_trades":          len(recent),
-        "full_n_trades":            n_full,
+        "recent_n_days":            len(recent),
+        "full_n_days":              n_full,
+    }
+
+
+def run_recency_simulation_from_trades(
+    csv_path: str,
+    overall_payout_prob: float,
+    lookback_days: int = RECENCY_LOOKBACK_DAYS,
+    n_sims: int = 5_000,
+    risk_multiplier: float = 1.0,
+    max_days: int = 90,
+    stop_at_payout: bool = True,
+    seed: int | None = None,
+) -> dict:
+    """Run a recency simulation using trades from the last *lookback_days*
+    calendar days.
+
+    The window is calendar-anchored so that strategies with different trading
+    frequencies all reflect the same market regime in their recency window.
+    A ``low_sample_warning`` flag is set when fewer than MIN_TRADES_WARNING
+    trades fall inside the window.
+
+    Returns
+    -------
+    dict with keys:
+        overall_pass_probability : float
+        recent_pass_probability  : float
+        probability_delta        : float
+        recency_status           : str
+        recency_comment          : str
+        lookback_days            : int   — calendar days requested
+        recent_n_trades          : int   — individual trade rows sampled
+        n_active_days            : int   — distinct trading days in window
+        full_n_trades            : int   — total rows in CSV
+        full_n_days              : int   — total trading days in CSV
+        low_sample_warning       : bool  — True when < MIN_TRADES_WARNING trades
+    """
+    daily_pnl, n_recent_trades, n_active_days, full_n_trades, full_n_days, low_warn = \
+        get_recent_trades_as_daily_pnl(csv_path, lookback_days)
+
+    if seed is not None:
+        np.random.seed(seed)
+
+    recent_results = run_simulations(
+        n_sims          = n_sims,
+        daily_pnl       = daily_pnl,
+        risk_multiplier = risk_multiplier,
+        max_days        = max_days,
+        stop_at_payout  = stop_at_payout,
+        n_paths         = 0,
+        mode            = "uniform",
+    )
+
+    recent_prob = recent_results["pass_rate"]
+    delta       = compute_probability_delta(overall_payout_prob, recent_prob)
+    comment     = generate_recency_comment(delta)
+
+    return {
+        "overall_pass_probability": round(float(overall_payout_prob), 4),
+        "recent_pass_probability":  round(float(recent_prob), 4),
+        "probability_delta":        delta,
+        "recency_status":           comment["status"],
+        "recency_comment":          comment["comment"],
+        "lookback_days":            lookback_days,
+        "recent_n_trades":          n_recent_trades,
+        "n_active_days":            n_active_days,
+        "full_n_trades":            full_n_trades,
+        "full_n_days":              full_n_days,
+        "low_sample_warning":       low_warn,
     }
 
 
@@ -269,6 +405,6 @@ def run_recency_simulation_from_pnl(
         "recency_status":           comment["status"],
         "recency_comment":          comment["comment"],
         "recent_window_size":       window,
-        "recent_n_trades":          len(recent),
-        "full_n_trades":            n_full,
+        "recent_n_days":            len(recent),
+        "full_n_days":              n_full,
     }

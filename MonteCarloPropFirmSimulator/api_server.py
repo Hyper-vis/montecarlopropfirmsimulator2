@@ -1063,11 +1063,13 @@ async def endpoint_rescue(req: RescueRequest):
     """
     try:
         csv_paths: List[str] = []
+        path_to_filename: Dict[str, str] = {}
         for sid in req.strategy_ids:
             entry = strategy_db.get_strategy(sid)
             if entry is None:
                 return _error(f"strategy_id not found: {sid!r}", 400)
             csv_paths.append(entry["path"])
+            path_to_filename[entry["path"]] = entry["filename"]
 
         if not csv_paths:
             return _error("At least one strategy is required.", 400)
@@ -1083,6 +1085,9 @@ async def endpoint_rescue(req: RescueRequest):
                 seed                 = req.seed,
             ),
         )
+        # Annotate each result with the human-readable filename
+        for r in results:
+            r["filename"] = path_to_filename.get(r.get("csv", ""), "")
         return {"results": results, "n_strategies": len(csv_paths)}
 
     except Exception as exc:

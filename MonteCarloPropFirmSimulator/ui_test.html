@@ -505,6 +505,37 @@
             align-self: flex-start;
         }
 
+        /* ── Rescue wide layout ── */
+        body.rescue-mode {
+            padding: 1rem;
+        }
+
+        body.rescue-mode #page-wrap {
+            flex-direction: row;
+            align-items: flex-start;
+            gap: 1.5rem;
+            width: 100%;
+        }
+
+        body.rescue-mode #left-panel {
+            width: 390px;
+            flex-shrink: 0;
+            align-items: stretch;
+        }
+
+        body.rescue-mode #left-panel .card {
+            max-width: 100%;
+        }
+
+        body.rescue-mode #chart-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 1.2rem;
+            flex: 1;
+            min-width: 0;
+            align-self: flex-start;
+        }
+
         .chart-card {
             background: #1a1d27;
             border: 1px solid #2a2d3a;
@@ -912,6 +943,16 @@
             <div class="chart-card" id="opt-chart-card" style="display:none">
                 <div class="chart-card-title">Portfolio Allocation</div>
                 <div id="opt-chart-body"></div>
+            </div>
+
+            <div class="chart-card" id="rescue-panel-card" style="display:none">
+                <div class="chart-card-title" style="color:#f87171">&#x1F6A8; Rescue Analysis</div>
+                <div id="rescue-panel-content"></div>
+                <details style="margin-top:1rem">
+                    <summary style="font-size:0.72rem;color:#444;cursor:pointer">Raw JSON response</summary>
+                    <pre id="rescue-raw-json"
+                        style="font-size:0.72rem;color:#555;white-space:pre-wrap;word-break:break-all"></pre>
+                </details>
             </div>
 
         </div><!-- #chart-panel -->
@@ -1335,7 +1376,7 @@
             else if (currentEp === "correlation") renderCorrelation(data, grid);
             else if (currentEp === "multi_account") renderMultiAccount(data, grid);
             else if (currentEp === "optimizer") renderPortfolioOptimizer(data, grid);
-            else if (currentEp === "rescue") renderRescue(data, grid);
+            else if (currentEp === "rescue") renderRescue(data);
             // Draw equity chart if chart mode is active and data has paths
             if (chartModeActive) {
                 const paths = data?.distributions?.equity_paths;
@@ -1753,7 +1794,8 @@
                 </tr>`;
             }).join('');
 
-            grid.innerHTML = `
+            const _lbCommentary = buildLeaderboardCommentary(rows, simType, metric);
+            grid.innerHTML = _lbCommentary + `
                 <div style="padding:0">
                     <div style="font-size:0.68rem;letter-spacing:0.1em;text-transform:uppercase;color:#4a7eff;margin-bottom:0.7rem">
                         &#x1F3C6; ${simLabels[simType] || simType} &mdash; Ranked by ${metricLabels[metric] || metric}
@@ -1796,91 +1838,330 @@
                 });
                 const data = await resp.json();
                 if (!resp.ok || data.error) { showError(data.error || 'Server error'); return; }
-                renderRescue(data, document.getElementById('result-grid'));
-                document.getElementById('raw-json').textContent = JSON.stringify(data, null, 2);
-                document.getElementById('results-card').style.display = 'block';
+                document.body.classList.add('rescue-mode');
+                const card = document.getElementById('rescue-panel-card');
+                card.style.display = 'block';
+                renderRescue(data);
+                document.getElementById('rescue-raw-json').textContent = JSON.stringify(data, null, 2);
             } catch (e) {
                 showError('Could not reach the API server. Is it running?\n\n' + e.message);
             } finally { btn.disabled = false; spinner.style.display = 'none'; }
         }
 
-        function renderRescue(data, grid) {
-            grid.style.gridTemplateColumns = '1fr';
-            const rows = data.results || [];
-            if (!rows.length) { grid.innerHTML = '<p style="color:#888">No results returned.</p>'; return; }
+        // Rescue sort state
+        let _rescueData = null;
+        let _rescueSortKey = 'pass_probability';
+        let _rescueSortAsc = false;
+
+        function _rescueSortBy(key) {
+            if (_rescueSortKey === key) {
+                _rescueSortAsc = !_rescueSortAsc;
+            } else {
+                _rescueSortKey = key;
+                // blow/timeout asc-first (lower is better); everything else desc-first
+                _rescueSortAsc = (key === 'blow_probability' || key === 'timeout_probability' || key === 'name');
+            }
+            _drawRescueTable();
+        }
+
+        function renderRescue(data) {
+            _rescueData = data;
+            _rescueSortKey = 'pass_probability';
+            _rescueSortAsc = false;
+            _drawRescueTable();
+        }
+
+        function _drawRescueTable() {
+            const container = document.getElementById('rescue-panel-content');
+            if (!_rescueData) return;
+            const allRows = (_rescueData.results || []).filter(r => !r.error);
+            const errRows = (_rescueData.results || []).filter(r => r.error);
+            if (!allRows.length && !errRows.length) { container.innerHTML = '<p style="color:#888">No results returned.</p>'; return; }
 
             const passCol = p => p >= 0.55 ? '#4ade80' : p >= 0.35 ? '#f59e0b' : '#f87171';
             const pct = v => (v * 100).toFixed(1) + '%';
             const dollar = v => '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-            const first = rows[0];
+            // Sort
+            const key = _rescueSortKey;
+            const asc = _rescueSortAsc;
+            const sorted = [...allRows].sort((a, b) => {
+                let va, vb;
+                if (key === 'name') {
+                    va = (a.filename || a.csv || '').toLowerCase();
+                    vb = (b.filename || b.csv || '').toLowerCase();
+                    return asc ? va.localeCompare(vb) : vb.localeCompare(va);
+                }
+                va = a[key] ?? -Infinity;
+                vb = b[key] ?? -Infinity;
+                return asc ? va - vb : vb - va;
+            });
+
+            const first = _rescueData.results[0];
             const balStr = dollar(first.current_balance || 0);
             const floorStr = dollar(first.trailing_stop_floor || 0);
             const distStr = dollar(first.distance_to_stop || 0);
 
             const headerHtml = `
-                <div style="font-size:0.68rem;letter-spacing:0.1em;text-transform:uppercase;color:#f87171;margin-bottom:0.7rem">
-                    &#x1F6A8; Rescue Analysis — Balance: ${balStr} &nbsp;|&nbsp; Floor: ${floorStr} &nbsp;|&nbsp; Buffer: ${distStr}
+                <div style="font-size:0.72rem;color:#888;margin-bottom:1rem;line-height:1.8">
+                    <span style="color:#ddd">Balance:</span> <strong style="color:#4ade80">${balStr}</strong>
+                    &nbsp;&nbsp;<span style="color:#ddd">Floor:</span> <strong style="color:#f87171">${floorStr}</strong>
+                    &nbsp;&nbsp;<span style="color:#ddd">Buffer:</span> <strong style="color:#f59e0b">${distStr}</strong>
+                    &nbsp;&nbsp;<span style="color:#555">${first.n_sims?.toLocaleString() || ''} sims</span>
+                    &nbsp;&nbsp;<span style="color:#4a7eff;font-size:0.65rem">Click column headers to sort</span>
                 </div>`;
 
-            const tableRows = rows.map((r, i) => {
-                if (r.error) return `
-                    <tr style="font-size:0.78rem;border-bottom:1px solid #141726">
-                        <td style="padding:0.5rem 0.5rem;text-align:center;color:#444">#${i + 1}</td>
-                        <td colspan="5" style="padding:0.5rem;color:#f87171">${r.csv || ''}: ${r.error}</td>
-                    </tr>`;
+            const arrow = k => k === key ? (asc ? ' ▲' : ' ▼') : '';
+            const thStyle = (k, align = 'right') => `padding:0.45rem 0.8rem;text-align:${align};white-space:nowrap;cursor:pointer;user-select:none;` + (k === key ? 'color:#a78bfa;' : 'color:#4a7eff;');
 
-                const name = (r.csv || '').split(/[\\/]/).pop().replace('.csv', '').replace(/MultiBot_-_[0-9.]+_/, '');
-                const rankStyle = i === 0 ? 'color:#f59e0b;font-weight:700' : i < 3 ? 'color:#94a3b8;font-weight:600' : 'color:#444';
+            const tableRows = sorted.map((r, i) => {
+                const name = (r.filename || (r.csv || '').split(/[\/]/).pop()).replace('.csv', '').replace(/^MultiBot_-_[0-9.]+_/, '');
+                const rankStyle = i === 0 ? 'color:#f59e0b;font-weight:700' : i < 3 ? 'color:#94a3b8;font-weight:600' : 'color:#555';
                 const pp = r.pass_probability || 0;
                 const bp = r.blow_probability || 0;
                 const tp = r.timeout_probability || 0;
                 const mp = r.mean_payout || 0;
                 const barW = Math.round(pp * 100);
-                const blowW = Math.round(bp * 100);
+                const rpp = r.recent_pass_probability;
+                const delta = r.probability_delta;
+                const status = r.recency_status;
+                const recentStr = rpp != null ? pct(rpp) : '—';
+                const recentCol = rpp != null ? passCol(rpp) : '#555';
+                let trendBadge = '—';
+                if (status) {
+                    const tc = status === 'Improving' ? '#4ade80' : status === 'Weakening' ? '#f87171' : '#888';
+                    const dStr = delta != null ? ' ' + (delta >= 0 ? '+' : '') + (delta * 100).toFixed(1) + '%' : '';
+                    trendBadge = `<span style="font-size:0.68rem;font-weight:700;padding:0.1rem 0.45rem;border-radius:999px;background:${tc}22;color:${tc};border:1px solid ${tc}44;white-space:nowrap">${status}${dStr}</span>`;
+                }
                 return `
                     <tr style="font-size:0.8rem;border-bottom:1px solid #141726;transition:background 0.15s" onmouseover="this.style.background='#111525'" onmouseout="this.style.background=''">
-                        <td style="padding:0.5rem 0.5rem;text-align:center;${rankStyle}">#${i + 1}</td>
-                        <td style="padding:0.5rem 0.5rem;color:#ddd;font-weight:500;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${r.csv || ''}">${name}</td>
-                        <td style="padding:0.5rem 0.7rem;text-align:right">
-                            <div style="font-size:0.9rem;font-weight:700;color:${passCol(pp)}">${pct(pp)}</div>
-                            <div style="margin-top:3px;height:4px;border-radius:2px;background:#1a1f35;width:80px;display:inline-block">
+                        <td style="padding:0.5rem 0.6rem;text-align:center;white-space:nowrap;${rankStyle}">#${i + 1}</td>
+                        <td style="padding:0.5rem 0.8rem;color:#ddd;font-weight:500;white-space:nowrap">${name}</td>
+                        <td style="padding:0.5rem 0.8rem;text-align:right;white-space:nowrap">
+                            <div style="font-size:0.95rem;font-weight:700;color:${passCol(pp)}">${pct(pp)}</div>
+                            <div style="margin-top:3px;height:4px;border-radius:2px;background:#1a1f35;width:90px;display:inline-block">
                                 <div style="height:100%;border-radius:2px;background:${passCol(pp)};width:${barW}%"></div>
                             </div>
                         </td>
-                        <td style="padding:0.5rem 0.7rem;text-align:right;color:#f87171;font-size:0.85rem">${pct(bp)}</td>
-                        <td style="padding:0.5rem 0.7rem;text-align:right;color:#888;font-size:0.85rem">${pct(tp)}</td>
-                        <td style="padding:0.5rem 0.7rem;text-align:right;color:${mp > 0 ? '#4ade80' : '#555'};font-size:0.85rem">${mp > 0 ? dollar(mp) : '—'}</td>
+                        <td style="padding:0.5rem 0.8rem;text-align:right;white-space:nowrap;color:${recentCol}">${recentStr}</td>
+                        <td style="padding:0.5rem 0.8rem;text-align:right;white-space:nowrap">${trendBadge}</td>
+                        <td style="padding:0.5rem 0.8rem;text-align:right;white-space:nowrap;color:#f87171">${pct(bp)}</td>
+                        <td style="padding:0.5rem 0.8rem;text-align:right;white-space:nowrap;color:#555">${pct(tp)}</td>
+                        <td style="padding:0.5rem 0.8rem;text-align:right;white-space:nowrap;color:${mp > 0 ? '#4ade80' : '#555'}">${mp > 0 ? dollar(mp) : '—'}</td>
                     </tr>`;
             }).join('');
 
-            grid.innerHTML = `
-                <div style="padding:0">
-                    ${headerHtml}
-                    <div style="overflow-x:auto">
-                        <table style="width:100%;border-collapse:collapse;table-layout:fixed">
-                            <colgroup>
-                                <col style="width:42px">
-                                <col style="min-width:160px">
-                                <col style="width:130px">
-                                <col style="width:90px">
-                                <col style="width:90px">
-                                <col style="width:110px">
-                            </colgroup>
-                            <thead>
-                                <tr style="font-size:0.65rem;letter-spacing:0.08em;text-transform:uppercase;color:#4a7eff;border-bottom:2px solid #22274a">
-                                    <td style="padding:0.45rem 0.5rem;text-align:center">#</td>
-                                    <td style="padding:0.45rem 0.5rem">Strategy</td>
-                                    <td style="padding:0.45rem 0.7rem;text-align:right">Pass %</td>
-                                    <td style="padding:0.45rem 0.7rem;text-align:right">Blow %</td>
-                                    <td style="padding:0.45rem 0.7rem;text-align:right">Timeout %</td>
-                                    <td style="padding:0.45rem 0.7rem;text-align:right">Avg Payout</td>
-                                </tr>
-                            </thead>
-                            <tbody>${tableRows}</tbody>
-                        </table>
-                    </div>
+            const errHtml = errRows.map((r, i) => `
+                <tr style="font-size:0.78rem;border-bottom:1px solid #141726">
+                    <td style="padding:0.5rem;text-align:center;color:#444">—</td>
+                    <td colspan="7" style="padding:0.5rem;color:#f87171">${r.filename || r.csv || ''}: ${r.error}</td>
+                </tr>`).join('');
+
+            const _rescueCommentary = buildRescueCommentary(allRows);
+            container.innerHTML = `
+                ${headerHtml}
+                ${_rescueCommentary}
+                <div style="overflow-x:auto">
+                    <table style="border-collapse:collapse;table-layout:auto;width:100%">
+                        <thead>
+                            <tr style="font-size:0.65rem;letter-spacing:0.08em;text-transform:uppercase;border-bottom:2px solid #22274a">
+                                <td style="padding:0.45rem 0.6rem;text-align:center;white-space:nowrap;color:#4a7eff">#</td>
+                                <td onclick="_rescueSortBy('name')" style="${thStyle('name', 'left')}">Strategy${arrow('name')}</td>
+                                <td onclick="_rescueSortBy('pass_probability')" style="${thStyle('pass_probability')}">Pass %${arrow('pass_probability')}</td>
+                                <td onclick="_rescueSortBy('recent_pass_probability')" style="${thStyle('recent_pass_probability')}">Recent %${arrow('recent_pass_probability')}</td>
+                                <td onclick="_rescueSortBy('probability_delta')" style="${thStyle('probability_delta')}">Trend${arrow('probability_delta')}</td>
+                                <td onclick="_rescueSortBy('blow_probability')" style="${thStyle('blow_probability')}">Blow %${arrow('blow_probability')}</td>
+                                <td onclick="_rescueSortBy('timeout_probability')" style="${thStyle('timeout_probability')}">Timeout %${arrow('timeout_probability')}</td>
+                                <td onclick="_rescueSortBy('mean_payout')" style="${thStyle('mean_payout')}">Avg Payout${arrow('mean_payout')}</td>
+                            </tr>
+                        </thead>
+                        <tbody>${tableRows}${errHtml}</tbody>
+                    </table>
                 </div>`;
+        }
+
+        // ── Leaderboard commentary ────────────────────────────────────────────────────────
+        function buildLeaderboardCommentary(rows, simType, metric) {
+            if (!rows || !rows.length) return '';
+            const top = rows[0];
+            const topName = (top.filename || top.strategy_id || '').replace('.csv', '').replace(/MultiBot_-_[0-9.]+_/, '');
+            const withRecency = rows.filter(r => r.recency_status != null);
+            const hasTrend = withRecency.length > 0;
+            const bullets = [];
+
+            // ── Action headline ──────────────────────────────────────────────
+            const topPass = top.pass_probability;
+            let actionIcon, actionColor, actionText;
+            if (topPass >= 0.65) {
+                actionIcon = '→'; actionColor = '#4ade80';
+                actionText = `<strong>${topName}</strong> leads with a strong <strong>${(topPass * 100).toFixed(1)}% pass rate</strong>`;
+            } else if (topPass >= 0.45) {
+                actionIcon = '⚠'; actionColor = '#f59e0b';
+                actionText = `<strong>${topName}</strong> leads with a moderate <strong>${(topPass * 100).toFixed(1)}% pass rate</strong>`;
+            } else {
+                actionIcon = '🔴'; actionColor = '#f87171';
+                actionText = `Your top strategy <strong>${topName}</strong> only passes <strong>${(topPass * 100).toFixed(1)}%</strong> of the time — all options are challenging`;
+            }
+
+            // ── Payout bullet ───────────────────────────────────────────────
+            if (top.expected_monthly_payout != null && top.expected_monthly_payout > 0) {
+                bullets.push({ icon: '💰', text: `Top strategy yields an estimated <strong>$${top.expected_monthly_payout.toLocaleString('en-US', { maximumFractionDigits: 0 })}/mo</strong> average payout when it passes.` });
+            }
+
+            if (hasTrend) {
+                const improving = withRecency.filter(r => r.recency_status === 'Improving');
+                const weakening = withRecency.filter(r => r.recency_status === 'Weakening');
+
+                // Warn if #1 is weakening
+                if (top.recency_status === 'Weakening') {
+                    const dStr = top.probability_delta != null ? ` (${(top.probability_delta * 100).toFixed(1)}% drift)` : '';
+                    bullets.push({ icon: '⚠️', text: `<strong>Caution:</strong> your #1 ranked strategy is currently <strong style="color:#f87171">Weakening</strong>${dStr}. Its historical rank may not reflect current trading regime.` });
+                }
+
+                // Best improving
+                if (improving.length) {
+                    const bestImp = improving.reduce((a, b) => (b.probability_delta || 0) > (a.probability_delta || 0) ? b : a);
+                    const biName = (bestImp.filename || bestImp.strategy_id || '').replace('.csv', '').replace(/MultiBot_-_[0-9.]+_/, '');
+                    const dStr = bestImp.probability_delta != null ? `+${(bestImp.probability_delta * 100).toFixed(1)}%` : '';
+                    bullets.push({ icon: '📈', text: `<strong>${biName}</strong> shows the strongest recency momentum${dStr ? ` (${dStr} delta)` : ''} — it may be outperforming its historical ranking.` });
+                }
+
+                // Worst weakening (only if different from top, to avoid duplicate)
+                if (weakening.length && top.recency_status !== 'Weakening') {
+                    const worstWeak = weakening.reduce((a, b) => (b.probability_delta || 0) < (a.probability_delta || 0) ? b : a);
+                    const wwName = (worstWeak.filename || worstWeak.strategy_id || '').replace('.csv', '').replace(/MultiBot_-_[0-9.]+_/, '');
+                    const dStr = worstWeak.probability_delta != null ? `(${(worstWeak.probability_delta * 100).toFixed(1)}% drift)` : '';
+                    bullets.push({ icon: '📉', text: `<strong>${wwName}</strong> is the most deteriorated strategy ${dStr} — treat its historical stats with caution.` });
+                }
+
+                // Standout: highest recent pass% but not ranked #1 overall
+                const byRecent = [...withRecency].sort((a, b) => (b.recent_pass_probability || 0) - (a.recent_pass_probability || 0));
+                if (byRecent.length && byRecent[0].strategy_id !== top.strategy_id) {
+                    const standout = byRecent[0];
+                    const sName = (standout.filename || standout.strategy_id || '').replace('.csv', '').replace(/MultiBot_-_[0-9.]+_/, '');
+                    bullets.push({ icon: '🔍', text: `<strong>${sName}</strong> has the highest <em>recent</em> pass rate (${(standout.recent_pass_probability * 100).toFixed(1)}%) even though it ranks lower overall. If current-regime fit matters, it deserves a closer look.` });
+                }
+
+                // Summary count
+                const improving_c = improving.length, weakening_c = weakening.length;
+                if (improving_c > 0 || weakening_c > 0) {
+                    const parts = [
+                        improving_c ? `<strong style="color:#4ade80">${improving_c} Improving</strong>` : null,
+                        weakening_c ? `<strong style="color:#f87171">${weakening_c} Weakening</strong>` : null,
+                    ].filter(Boolean).join(' and ');
+                    bullets.push({ icon: '📊', text: `Of ${withRecency.length} strategies with recency data: ${parts}.` });
+                }
+            } else {
+                bullets.push({ icon: '💡', text: `Recency trend data is unavailable for this sim type. Run a <strong>Batch</strong> simulation to unlock per-strategy drift analysis.` });
+            }
+
+            const bulletHtml = bullets.map(b => `
+                <div style="display:flex;gap:0.55rem;align-items:flex-start;padding:0.45rem 0;border-bottom:1px solid #1a1d28">
+                    <span style="font-size:1rem;line-height:1.3;flex-shrink:0">${b.icon}</span>
+                    <div style="font-size:0.82rem;color:#aaa;line-height:1.55">${b.text}</div>
+                </div>`).join('');
+
+            return `
+            <div style="background:#111420;border:1px solid #2a2d3a;border-radius:10px;padding:1.2rem 1.4rem;margin-bottom:1rem">
+                <div style="font-size:0.68rem;letter-spacing:0.12em;text-transform:uppercase;color:#4a7eff;margin-bottom:0.6rem">Leaderboard Insights</div>
+                <div style="font-size:0.88rem;color:#ddd;line-height:1.6;margin-bottom:${bullets.length ? '0.9rem' : '0'}">
+                    <span style="color:${actionColor};font-weight:700;margin-right:0.35rem">${actionIcon}</span>${actionText}.
+                </div>
+                ${bullets.length ? `<div style="font-size:0.68rem;letter-spacing:0.12em;text-transform:uppercase;color:#444;margin-bottom:0.3rem">What we noticed</div>${bulletHtml}` : ''}
+            </div>`;
+        }
+
+        // ── Rescue commentary ─────────────────────────────────────────────────────────────
+        function buildRescueCommentary(allRows) {
+            if (!allRows || !allRows.length) return '';
+            const byPass = [...allRows].sort((a, b) => (b.pass_probability || 0) - (a.pass_probability || 0));
+            const best = byPass[0];
+            const bestName = (best.filename || (best.csv || '').split(/[\/\\]/).pop()).replace('.csv', '').replace(/^MultiBot_-_[0-9.]+_/, '');
+            const withRecency = allRows.filter(r => r.recency_status != null);
+            const hasTrend = withRecency.length > 0;
+            const bullets = [];
+
+            // ── Buffer danger ────────────────────────────────────────────────
+            const dist = best.distance_to_stop || 0;
+            if (dist < 500) {
+                bullets.push({ icon: '🚨', text: `<strong>Critical buffer:</strong> only <strong style="color:#f87171">$${dist.toLocaleString('en-US', { maximumFractionDigits: 0 })}</strong> from your trailing stop. A single bad session could end this account — size down aggressively.` });
+            } else if (dist < 1000) {
+                bullets.push({ icon: '⚠️', text: `<strong>Tight buffer:</strong> $${dist.toLocaleString('en-US', { maximumFractionDigits: 0 })} remaining to your stop floor. Prioritise lower-variance strategies and reduce size if possible.` });
+            } else if (dist < 1500) {
+                bullets.push({ icon: '🟡', text: `Buffer of $${dist.toLocaleString('en-US', { maximumFractionDigits: 0 })} is workable but not comfortable. Stick to your highest-pass-rate strategy and avoid chasing losses.` });
+            }
+
+            // ── Action headline ──────────────────────────────────────────────
+            const pp = best.pass_probability || 0;
+            let actionIcon, actionColor, actionText;
+            if (pp >= 0.55) {
+                actionIcon = '→'; actionColor = '#4ade80';
+                actionText = `<strong>${bestName}</strong> gives you the best shot at recovery with a <strong>${(pp * 100).toFixed(1)}% pass rate</strong> from your current balance`;
+            } else if (pp >= 0.35) {
+                actionIcon = '⚠'; actionColor = '#f59e0b';
+                actionText = `<strong>${bestName}</strong> is your best option at <strong>${(pp * 100).toFixed(1)}%</strong>, but the odds are against you — play defensively`;
+            } else {
+                actionIcon = '🔴'; actionColor = '#f87171';
+                actionText = `All strategies show <strong>low pass rates from this balance</strong>. Best available is <strong>${bestName}</strong> at ${(pp * 100).toFixed(1)}% — consider pausing and reassessing your account state`;
+            }
+
+            // ── Blow-up risk ─────────────────────────────────────────────────
+            const bp = best.blow_probability || 0;
+            if (bp > 0.40) {
+                bullets.push({ icon: '💥', text: `<strong>High blow-up risk</strong> on the top strategy: <strong style="color:#f87171">${(bp * 100).toFixed(1)}%</strong> of sims end at the trailing stop. Have a plan B and don't overtrade trying to recover quickly.` });
+            } else if (bp > 0.25) {
+                bullets.push({ icon: '⚡', text: `Moderate blow %: ${(bp * 100).toFixed(1)}% of sims hit the stop wall. Stay disciplined — incremental recovery beats a blown account.` });
+            }
+
+            // ── Recency analysis ─────────────────────────────────────────────
+            if (hasTrend) {
+                const byRecent = [...withRecency].sort((a, b) => (b.recent_pass_probability || 0) - (a.recent_pass_probability || 0));
+                const bestRecent = byRecent[0];
+                const brName = (bestRecent.filename || (bestRecent.csv || '').split(/[\/\\]/).pop()).replace('.csv', '').replace(/^MultiBot_-_[0-9.]+_/, '');
+                const sameTop = (bestRecent.csv === best.csv || bestRecent.filename === best.filename);
+
+                if (sameTop) {
+                    if (best.recency_status === 'Improving') {
+                        bullets.push({ icon: '✅', text: `<strong>Edge confirmed:</strong> <strong>${bestName}</strong> leads on both overall AND recent pass rate${best.probability_delta != null ? ` (+${(best.probability_delta * 100).toFixed(1)}% delta)` : ''} — strong signal to run this strategy.` });
+                    } else if (best.recency_status === 'Stable') {
+                        bullets.push({ icon: '📊', text: `<strong>${bestName}</strong> is <strong>Stable</strong> in recent data — consistent with its historical pass rate, no regime drift detected.` });
+                    } else if (best.recency_status === 'Weakening') {
+                        bullets.push({ icon: '⚠️', text: `<strong>Mixed signal:</strong> <strong>${bestName}</strong> is your best overall option but is currently <strong style="color:#f87171">Weakening</strong>. Its recent pass rate is below its historical average.` });
+                    }
+                } else {
+                    const recentPct = (bestRecent.recent_pass_probability * 100).toFixed(1);
+                    bullets.push({ icon: '🔍', text: `<strong>Note:</strong> recent data favours <strong>${brName}</strong> (${recentPct}% recent pass%) over ${bestName}. If current-regime fit matters more than long-run stats, consider running ${brName} instead.` });
+                }
+
+                // Fastest-improving if different from top
+                const improving = withRecency.filter(r => r.recency_status === 'Improving');
+                if (improving.length && allRows.length > 1) {
+                    const fastestImp = improving.reduce((a, b) => (b.probability_delta || 0) > (a.probability_delta || 0) ? b : a);
+                    const fiCsv = fastestImp.csv || fastestImp.filename;
+                    const bestCsv = best.csv || best.filename;
+                    if (fiCsv !== bestCsv) {
+                        const fiName = (fastestImp.filename || (fastestImp.csv || '').split(/[\/\\]/).pop()).replace('.csv', '').replace(/^MultiBot_-_[0-9.]+_/, '');
+                        bullets.push({ icon: '📈', text: `<strong>${fiName}</strong> is the fastest-improving strategy in this set. While its overall pass rate may be lower, its momentum could be a bullish signal.` });
+                    }
+                }
+            } else {
+                bullets.push({ icon: '💡', text: `No recency data available for these strategies. Run a <strong>Batch</strong> simulation first to evaluate regime fitness before relying on them in a live rescue.` });
+            }
+
+            const bulletHtml = bullets.map(b => `
+                <div style="display:flex;gap:0.55rem;align-items:flex-start;padding:0.45rem 0;border-bottom:1px solid #1a1d28">
+                    <span style="font-size:1rem;line-height:1.3;flex-shrink:0">${b.icon}</span>
+                    <div style="font-size:0.82rem;color:#aaa;line-height:1.55">${b.text}</div>
+                </div>`).join('');
+
+            return `
+            <div style="background:#111420;border:1px solid #2a2d3a;border-radius:10px;padding:1.2rem 1.4rem;margin-bottom:1rem">
+                <div style="font-size:0.68rem;letter-spacing:0.12em;text-transform:uppercase;color:#4a7eff;margin-bottom:0.6rem">Rescue Analysis</div>
+                <div style="font-size:0.88rem;color:#ddd;line-height:1.6;margin-bottom:${bullets.length ? '0.9rem' : '0'}">
+                    <span style="color:${actionColor};font-weight:700;margin-right:0.35rem">${actionIcon}</span>${actionText}.
+                </div>
+                ${bullets.length ? `<div style="font-size:0.68rem;letter-spacing:0.12em;text-transform:uppercase;color:#444;margin-bottom:0.3rem">What we noticed</div>${bulletHtml}` : ''}
+            </div>`;
         }
 
         // ── Optimizer: build body + render ───────────────────────────────────────────────
@@ -2106,9 +2387,19 @@
                 const deltaStr = rec.probability_delta != null
                     ? (rec.probability_delta >= 0 ? '+' : '') + (rec.probability_delta * 100).toFixed(1) + '%' : '\u2014';
                 const recentPctStr = rec.recent_pass_probability != null ? pct(rec.recent_pass_probability) : '\u2014';
-                const windowLabel = rec.recent_window_size != null ? `Recent (last ${rec.recent_window_size})` : 'Recent';
-                const tradeInfo = (rec.recent_n_trades != null && rec.full_n_trades != null)
-                    ? `${rec.recent_n_trades} of ${rec.full_n_trades} trades` : '';
+                const lookbackDays = rec.lookback_days ?? 30;
+                const windowLabel = `Recent (last ${lookbackDays}d)`;
+                const nTrades    = rec.recent_n_trades ?? rec.recent_window_size;
+                const nActive    = rec.n_active_days ?? rec.recent_n_days;
+                const fullT      = rec.full_n_trades;
+                const lowWarn    = rec.low_sample_warning === true;
+                const tradeInfo  = (nTrades != null && fullT != null)
+                    ? `last ${lookbackDays} days &middot; ${nTrades} trade${nTrades === 1 ? '' : 's'} &middot; ${nActive ?? '?'} active days`
+                    : (rec.recent_n_days != null && rec.full_n_days != null)
+                    ? `${rec.recent_n_days} of ${rec.full_n_days} trading days` : '';
+                const lowWarnHtml = lowWarn
+                    ? `<div style="font-size:0.72rem;color:#f59e0b;margin-top:0.4rem">&#9888; Low sample (&lt;${nTrades} trades in window) — estimate has high variance.</div>`
+                    : '';
                 const recencyHtml = `
                 <div style="grid-column:1/-1;background:#0d0f1c;border:1px solid #22274a;border-radius:10px;padding:1rem 1.2rem;margin-top:0.2rem">
                     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.7rem">
@@ -2130,6 +2421,7 @@
                         </div>
                     </div>
                     <div style="font-size:0.78rem;color:#777;line-height:1.5">${rec.recency_comment || ''}</div>
+                    ${lowWarnHtml}
                 </div>`;
                 grid.insertAdjacentHTML('beforeend', recencyHtml);
             }
@@ -2475,6 +2767,9 @@
             document.getElementById("results-card").style.display = "none";
             const oc = document.getElementById("opt-chart-card");
             if (oc) oc.style.display = "none";
+            const rc = document.getElementById("rescue-panel-card");
+            if (rc) rc.style.display = "none";
+            document.body.classList.remove('rescue-mode');
         }
 
         // -- Init ---------------------------------------------------------------
