@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pandas
+numpy
+pydantic
+python-multipart
+openpyxl
+matplotlib
+yfinance
