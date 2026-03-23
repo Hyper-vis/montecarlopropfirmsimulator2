@@ -34,14 +34,18 @@ import asyncio
 import hashlib
 import json as _json
 import logging
+import math
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
+import pandas as pd
+import numpy as np
 log = logging.getLogger(__name__)
 
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, UploadFile, Query
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -61,7 +65,9 @@ from portfolio_optimizer import (
     compute_correlation_matrix,
     find_optimal_portfolios,
 )
+from services.monte_carlo_service import run_trade_simulation_profile
 from routers.upload_mt5 import router as upload_mt5_router
+from routers.upload_ninjatrader import router as upload_ninjatrader_router
 
 # ─────────────────────────────────────────────────────────────────────────────
 # App
@@ -76,14 +82,28 @@ app = FastAPI(
     version="1.0.0",
 )
 
-# Allow the ui_test.html page (file:// origin → null) and any localhost UI
+# Configure CORS origins via env for production deployment.
+# Example:
+#   ALLOWED_ORIGINS=https://creditus.ca,https://www.creditus.ca,https://sim.creditus.ca
+allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "").strip()
+if allowed_origins_env:
+    allowed_origins = [o.strip() for o in allowed_origins_env.split(",") if o.strip()]
+else:
+    allowed_origins = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3002",
+        "http://127.0.0.1:3002",
+    ]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # localhost-only server; wildcard is safe here
+    allow_origins=allowed_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 app.include_router(upload_mt5_router)
+app.include_router(upload_ninjatrader_router)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Strategy storage — SQLite-backed; CSV files live in strategies/
@@ -109,12 +129,424 @@ def _resolve_csv(csv_path: Optional[str], strategy_id: Optional[str]) -> str:
     raise ValueError("Provide either csv_path or strategy_id.")
 
 
+def _resolve_entry(strategy_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not strategy_id:
+        return None
+    return strategy_db.get_strategy(strategy_id)
+
+
+def _is_mt5_strategy(strategy_id: Optional[str]) -> bool:
+    entry = _resolve_entry(strategy_id)
+    return bool(entry and entry.get("source") == "mt5")
+
+
+def _strategy_source(strategy_id: str) -> str:
+    entry = strategy_db.get_strategy(strategy_id)
+    if entry is None:
+        raise ValueError(f"strategy_id not found: {strategy_id!r}")
+    return str(entry.get("source") or "tradingview")
+
+
+def _validate_homogeneous_sources(strategy_ids: List[str]) -> None:
+    if not strategy_ids:
+        return
+    sources = {_strategy_source(sid) for sid in strategy_ids}
+    if len(sources) > 1:
+        ordered = ", ".join(sorted(sources))
+        raise ValueError(
+            f"Mixed strategy sources are not allowed in one run. Found: {ordered}."
+        )
+
+
+def _sources_for_strategy_ids(strategy_ids: List[str]) -> set[str]:
+    if not strategy_ids:
+        return set()
+    return {_strategy_source(sid) for sid in strategy_ids}
+
+
+def _load_trade_results_from_strategy_csv(csv_path: str) -> List[float]:
+    df = pd.read_csv(csv_path)
+    df.columns = df.columns.str.strip()
+    if "Net P&L USD" not in df.columns:
+        raise ValueError("Stored strategy CSV is missing 'Net P&L USD' column.")
+    return [float(v) for v in df["Net P&L USD"].tolist() if pd.notna(v)]
+
+
+def _calendar_to_trading_days(days: int, weekends_tradable: bool) -> int:
+    if weekends_tradable:
+        return max(1, int(days))
+    return max(1, int(math.ceil(float(days) * 5.0 / 7.0)))
+
+
+def _mt5_overrides_from_request(req: Any) -> dict[str, Any]:
+    start = float(req.starting_balance)
+    target = float(req.target_balance)
+    overall = float(req.overall_max_loss)
+    daily = float(req.daily_max_loss)
+    days = int(req.time_limit_days)
+    weekends = bool(req.weekends_tradable)
+
+    if start <= 0:
+        raise ValueError("Starting balance must be greater than 0.")
+    if target <= start:
+        raise ValueError("Target balance must be greater than starting balance.")
+    if overall <= 0:
+        raise ValueError("Overall max loss must be greater than 0.")
+    if daily <= 0:
+        raise ValueError("Daily max loss must be greater than 0.")
+    if days < 1:
+        raise ValueError("Time limit must be at least 1 calendar day.")
+
+    risk = float(getattr(req, "risk_multiplier", 1.0))
+    if risk <= 0:
+        raise ValueError("Risk multiplier must be greater than 0.")
+
+    return {
+        "account_size": start,
+        "payout_threshold": target,
+        "overall_max_loss": overall,
+        "daily_loss_limit": daily,
+        "max_days": _calendar_to_trading_days(days, weekends),
+        "risk_multiplier": risk,
+    }
+
+
+def _map_personal_until_payout(mc: dict, *, csv_path: str, n_sims: int, risk_multiplier: float, max_days: int) -> dict:
+    payouts = [float(v) for v in mc.get("payouts", [])]
+    days = [int(v) for v in mc.get("days", [])]
+    payout_days = [d for o, d in zip(mc.get("outcomes", []), days) if o == "payout"]
+    mean_payout = float(np.mean([p for p in payouts if p > 0])) if any(p > 0 for p in payouts) else 0.0
+
+    return {
+        "metadata": {
+            "csv_path": csv_path,
+            "n_sims": n_sims,
+            "risk_multiplier": risk_multiplier,
+            "max_days": max_days,
+            "sampling_mode": "uniform",
+            "weight_strength": 0.0,
+            "recent_window": 0,
+            "profile": "mt5_personal",
+        },
+        "probabilities": {
+            "payout_prob": mc.get("pass_probability", 0.0),
+            "blow_prob": mc.get("blow_probability", 0.0),
+            "timeout_prob": mc.get("timeout_probability", 0.0),
+        },
+        "metrics": {
+            "mean_days_all": float(np.mean(days)) if days else 0.0,
+            "mean_days_to_payout": float(np.mean(payout_days)) if payout_days else 0.0,
+            "median_days_to_payout": int(np.median(payout_days)) if payout_days else 0,
+            "mean_payout": mean_payout,
+            "tier_label": "PERSONAL",
+            "tier_description": "Personal account mode with user-defined balance, loss, target and time rules.",
+        },
+        "distributions": {
+            "equity_paths": mc.get("paths", []),
+        },
+        "recency": {
+            "overall_pass_probability": mc.get("pass_probability", 0.0),
+            "recent_pass_probability": None,
+            "probability_delta": None,
+            "recency_status": "n/a",
+            "recency_comment": "Recency analysis is not applied in MT5 personal mode.",
+        },
+    }
+
+
+def _map_personal_full_period(
+    mc: dict,
+    *,
+    csv_path: str,
+    n_sims: int,
+    risk_multiplier: float,
+    max_days: int,
+    reset_cost: float,
+) -> dict:
+    outcomes = list(mc.get("outcomes", []))
+    payouts = [float(v) for v in mc.get("payouts", [])]
+    balances = [float(v) for v in mc.get("balances", [])]
+    n = max(1, len(outcomes))
+
+    payout_then_blew = sum(1 for o, p in zip(outcomes, payouts) if o == "blow" and p > 0)
+    payout_survived = sum(1 for o, p in zip(outcomes, payouts) if o != "blow" and p > 0)
+    blow_no_payout = outcomes.count("blow") - payout_then_blew
+    timeout_no_pay = sum(1 for o, p in zip(outcomes, payouts) if o == "timeout" and p == 0)
+    winning_payouts = [p for p in payouts if p > 0]
+    pass_rate = float(mc.get("pass_probability", 0.0))
+    fail_rate = float(mc.get("blow_probability", 0.0))
+    avg_blow_loss = 0.0
+    account_size = float(mc.get("config", {}).get("account_size", 0.0))
+    blow_balances = [b for o, b in zip(outcomes, balances) if o == "blow"]
+    if blow_balances:
+        avg_blow_loss = float(np.mean([account_size - b for b in blow_balances]))
+    mean_payout = float(np.mean(winning_payouts)) if winning_payouts else 0.0
+    median_payout = float(np.median(winning_payouts)) if winning_payouts else 0.0
+    e_monthly = pass_rate * mean_payout - fail_rate * avg_blow_loss - reset_cost
+
+    return {
+        "metadata": {
+            "csv_path": csv_path,
+            "n_sims": n_sims,
+            "risk_multiplier": risk_multiplier,
+            "max_days": max_days,
+            "reset_cost": reset_cost,
+            "sampling_mode": "uniform",
+            "weight_strength": 0.0,
+            "recent_window": 0,
+            "profile": "mt5_personal",
+        },
+        "probabilities": {
+            "payout_prob": pass_rate,
+            "payout_survived_prob": payout_survived / n,
+            "payout_then_blew_prob": payout_then_blew / n,
+            "blow_no_payout_prob": blow_no_payout / n,
+            "timeout_no_pay_prob": timeout_no_pay / n,
+        },
+        "metrics": {
+            "mean_ending_balance": float(np.mean(balances)) if balances else 0.0,
+            "mean_blow_loss": avg_blow_loss,
+            "mean_payout": mean_payout,
+            "median_payout": median_payout,
+            "e_monthly": e_monthly,
+            "tier_label": "PERSONAL",
+            "tier_description": "Personal account mode with user-defined balance, loss, target and time rules.",
+        },
+        "distributions": {
+            "equity_paths": mc.get("paths", []),
+        },
+        "recency": {
+            "overall_pass_probability": pass_rate,
+            "recent_pass_probability": None,
+            "probability_delta": None,
+            "recency_status": "n/a",
+            "recency_comment": "Recency analysis is not applied in MT5 personal mode.",
+        },
+    }
+
+
+def _run_personal_batch(
+    strategy_ids: List[str],
+    req: Any,
+    progress_cb: Any = None,
+) -> List[Dict[str, Any]]:
+    overrides = _mt5_overrides_from_request(req)
+    total = len(strategy_ids)
+    rows: List[Dict[str, Any]] = []
+
+    for i, sid in enumerate(strategy_ids, start=1):
+        entry = strategy_db.get_strategy(sid)
+        if entry is None:
+            rows.append({"csv": sid, "error": f"strategy_id not found: {sid!r}"})
+            if progress_cb:
+                progress_cb(i, total, sid)
+            continue
+
+        csv_path = entry["path"]
+        csv_name = Path(csv_path).name
+
+        try:
+            trades = _load_trade_results_from_strategy_csv(csv_path)
+            utp = run_trade_simulation_profile(
+                trades,
+                n_sims=req.n_sims,
+                stop_at_payout=True,
+                profile="personal",
+                config_overrides=overrides,
+            )
+            fp = run_trade_simulation_profile(
+                trades,
+                n_sims=req.n_sims,
+                stop_at_payout=False,
+                profile="personal",
+                config_overrides=overrides,
+            )
+
+            utp_days = [
+                int(d)
+                for o, d in zip(utp.get("outcomes", []), utp.get("days", []))
+                if o == "payout"
+            ]
+            utp_mean_days = float(np.mean(utp_days)) if utp_days else 0.0
+            utp_ev_monthly = (
+                float(utp.get("pass_probability", 0.0))
+                * float(utp.get("expected_payout", 0.0))
+                * (21.0 / utp_mean_days)
+                if utp_mean_days > 0
+                else 0.0
+            )
+
+            fp_ev_net = (
+                float(fp.get("pass_probability", 0.0))
+                * float(fp.get("expected_payout", 0.0))
+                - float(req.reset_cost)
+            )
+
+            rows.append(
+                {
+                    "csv": csv_name,
+                    "utp_payout_p": float(utp.get("pass_probability", 0.0)),
+                    "utp_blow_p": float(utp.get("blow_probability", 0.0)),
+                    "utp_mean_days": utp_mean_days,
+                    "utp_ev_monthly": utp_ev_monthly,
+                    "utp_rating": "PERSONAL",
+                    "fp_payout_p": float(fp.get("pass_probability", 0.0)),
+                    "fp_blow_no_pay_p": float(fp.get("blow_probability", 0.0)),
+                    "fp_ev_net": fp_ev_net,
+                    "recent_pass_probability": None,
+                    "probability_delta": None,
+                    "recency_status": None,
+                }
+            )
+        except Exception as exc:
+            rows.append({"csv": csv_name, "error": str(exc)})
+
+        if progress_cb:
+            progress_cb(i, total, csv_path)
+
+    ok_rows = [r for r in rows if isinstance(r, dict) and "error" not in r]
+    err_rows = [r for r in rows if isinstance(r, dict) and "error" in r]
+    ok_rows.sort(key=lambda r: float(r.get("fp_ev_net") or 0.0), reverse=True)
+    return ok_rows + err_rows
+
+
+def _run_personal_multi_account(
+    *,
+    trades: List[float],
+    n_accounts: int,
+    n_sims: int,
+    stop_at_payout: bool,
+    n_path_sims: int,
+    overrides: Dict[str, Any],
+) -> Dict[str, Any]:
+    if n_accounts < 1:
+        raise ValueError("n_accounts must be >= 1")
+
+    account_runs: List[dict] = []
+    for _ in range(n_accounts):
+        account_runs.append(
+            run_trade_simulation_profile(
+                trades,
+                n_sims=n_sims,
+                stop_at_payout=stop_at_payout,
+                profile="personal",
+                config_overrides=overrides,
+            )
+        )
+
+    outcomes_by_account = [r.get("outcomes", []) for r in account_runs]
+    payouts_by_account = [r.get("payouts", []) for r in account_runs]
+    balances_by_account = [r.get("balances", []) for r in account_runs]
+    days_by_account = [r.get("days", []) for r in account_runs]
+    paths_by_account = [r.get("paths", []) for r in account_runs]
+
+    sims = min(len(v) for v in outcomes_by_account) if outcomes_by_account else 0
+    if sims <= 0:
+        raise ValueError("Simulation returned no outcomes for multi-account mode.")
+
+    portfolio_payouts: List[float] = []
+    blown_counts: List[int] = []
+    end_balance_portfolio: List[float] = []
+    any_payout_flags: List[bool] = []
+    days_to_any_payout: List[int] = []
+
+    for i in range(sims):
+        payouts_i = [float(payouts_by_account[a][i]) for a in range(n_accounts)]
+        outcomes_i = [str(outcomes_by_account[a][i]) for a in range(n_accounts)]
+        balances_i = [float(balances_by_account[a][i]) for a in range(n_accounts)]
+        days_i = [int(days_by_account[a][i]) for a in range(n_accounts)]
+
+        total_payout = float(sum(payouts_i))
+        portfolio_payouts.append(total_payout)
+        blown_counts.append(sum(1 for o in outcomes_i if o == "blow"))
+        end_balance_portfolio.append(float(sum(balances_i)))
+
+        has_payout = any(p > 0 for p in payouts_i)
+        any_payout_flags.append(has_payout)
+        if has_payout:
+            payout_days_i = [d for d, p in zip(days_i, payouts_i) if p > 0]
+            days_to_any_payout.append(min(payout_days_i))
+
+    pass_prob = float(np.mean(any_payout_flags)) if any_payout_flags else 0.0
+    mean_total_payout = float(np.mean(portfolio_payouts)) if portfolio_payouts else 0.0
+    mean_days_to_payout = float(np.mean(days_to_any_payout)) if days_to_any_payout else 0.0
+    est_cycles_per_month = (21.0 / mean_days_to_payout) if mean_days_to_payout > 0 else 0.0
+    est_monthly_gross = est_cycles_per_month * mean_total_payout
+
+    mean_end_balance_per_acct = [
+        float(np.mean([float(v) for v in balances])) if balances else 0.0
+        for balances in balances_by_account
+    ]
+
+    chart_account_paths: List[List[Dict[str, Any]]] = []
+    max_chart_sims = max(0, int(n_path_sims))
+    for a in range(n_accounts):
+        acct = []
+        max_k = min(max_chart_sims, len(paths_by_account[a]), len(outcomes_by_account[a]))
+        for k in range(max_k):
+            acct.append(
+                {
+                    "path": [float(x) for x in paths_by_account[a][k]],
+                    "outcome": str(outcomes_by_account[a][k]),
+                }
+            )
+        chart_account_paths.append(acct)
+
+    account_size = float(overrides.get("account_size", 50_000.0))
+    payout_threshold = float(overrides.get("payout_threshold", 52_600.0))
+    blow_floor = float(account_size - float(overrides.get("overall_max_loss", 2_500.0)))
+
+    return {
+        "metadata": {
+            "n_accounts": int(n_accounts),
+            "n_sims": int(sims),
+            "max_days": int(overrides.get("max_days", 30)),
+            "stop_at_payout": bool(stop_at_payout),
+            "profile": "mt5_personal",
+        },
+        "portfolio": {
+            "mean_total_payout": mean_total_payout,
+            "median_total_payout": float(np.median(portfolio_payouts)) if portfolio_payouts else 0.0,
+            "p5_payout": float(np.percentile(portfolio_payouts, 5)) if portfolio_payouts else 0.0,
+            "p95_payout": float(np.percentile(portfolio_payouts, 95)) if portfolio_payouts else 0.0,
+            "prob_any_payout": pass_prob,
+            "mean_blown_accounts": float(np.mean(blown_counts)) if blown_counts else 0.0,
+            "mean_end_balance_single": float(np.mean(mean_end_balance_per_acct)) if mean_end_balance_per_acct else 0.0,
+            "mean_end_balance_portfolio": float(np.mean(end_balance_portfolio)) if end_balance_portfolio else 0.0,
+            "mean_end_balance_per_acct": mean_end_balance_per_acct,
+        },
+        "cycle_efficiency": {
+            "payout_prob_per_cycle": pass_prob,
+            "mean_days_to_payout": mean_days_to_payout,
+            "median_days_to_payout": float(np.median(days_to_any_payout)) if days_to_any_payout else 0.0,
+            "p5_days": float(np.percentile(days_to_any_payout, 5)) if days_to_any_payout else 0.0,
+            "p95_days": float(np.percentile(days_to_any_payout, 95)) if days_to_any_payout else 0.0,
+            "pct_within_gate": float(np.mean([d <= 21 for d in days_to_any_payout])) if days_to_any_payout else 0.0,
+            "pct_within_10": float(np.mean([d <= 10 for d in days_to_any_payout])) if days_to_any_payout else 0.0,
+            "pct_within_15": float(np.mean([d <= 15 for d in days_to_any_payout])) if days_to_any_payout else 0.0,
+            "est_cycles_per_month": est_cycles_per_month,
+            "est_monthly_gross": est_monthly_gross,
+            "est_monthly_net": est_monthly_gross,
+        },
+        "chart_data": {
+            "portfolio_payouts": portfolio_payouts,
+            "account_paths": chart_account_paths,
+            "thresholds": {
+                "start": account_size,
+                "payout": payout_threshold,
+                "blow_floor": blow_floor,
+            },
+        },
+    }
+
+
 def _resolve_csv_list(
     csv_paths: Optional[List[str]],
     strategy_ids: Optional[List[str]],
 ) -> List[str]:
     """Resolve a list of file paths from csv_paths or strategy_ids."""
     if strategy_ids:
+        _validate_homogeneous_sources(strategy_ids)
         out: List[str] = []
         for sid in strategy_ids:
             entry = strategy_db.get_strategy(sid)
@@ -133,6 +565,7 @@ def _resolve_named_csvs(
 ) -> Dict[str, str]:
     """Resolve {name: path} from strategies dict or strategy_ids dict."""
     if strategy_ids:
+        _validate_homogeneous_sources(list(strategy_ids.values()))
         out: Dict[str, str] = {}
         for name, sid in strategy_ids.items():
             entry = strategy_db.get_strategy(sid)
@@ -236,6 +669,12 @@ class UntilPayoutRequest(BaseModel):
     weight_strength: float = Field(3.0, description="Exponential steepness (recency_weighted mode only).")
     recent_window: int = Field(50, ge=1, description="Look-back in trading days (recent_only mode only).")
     seed: Optional[int] = Field(None, description="RNG seed for reproducible results.")
+    starting_balance: float = Field(50_000.0, gt=0, description="MT5 personal mode: starting balance.")
+    overall_max_loss: float = Field(2_500.0, gt=0, description="MT5 personal mode: max absolute loss from start.")
+    daily_max_loss: float = Field(700.0, gt=0, description="MT5 personal mode: max daily loss.")
+    target_balance: float = Field(52_600.0, gt=0, description="MT5 personal mode: target account balance.")
+    time_limit_days: int = Field(90, ge=1, description="MT5 personal mode: calendar-day time constraint.")
+    weekends_tradable: bool = Field(False, description="MT5 personal mode: include weekends as tradable days.")
 
 
 class FullPeriodRequest(BaseModel):
@@ -250,6 +689,12 @@ class FullPeriodRequest(BaseModel):
     weight_strength: float = Field(3.0, description="Exponential steepness (recency_weighted mode only).")
     recent_window: int = Field(50, ge=1, description="Look-back in trading days (recent_only mode only).")
     seed: Optional[int] = Field(None, description="RNG seed for reproducible results.")
+    starting_balance: float = Field(50_000.0, gt=0, description="MT5 personal mode: starting balance.")
+    overall_max_loss: float = Field(2_500.0, gt=0, description="MT5 personal mode: max absolute loss from start.")
+    daily_max_loss: float = Field(700.0, gt=0, description="MT5 personal mode: max daily loss.")
+    target_balance: float = Field(52_600.0, gt=0, description="MT5 personal mode: target account balance.")
+    time_limit_days: int = Field(21, ge=1, description="MT5 personal mode: calendar-day time constraint.")
+    weekends_tradable: bool = Field(False, description="MT5 personal mode: include weekends as tradable days.")
 
 
 class BatchRequest(BaseModel):
@@ -259,8 +704,15 @@ class BatchRequest(BaseModel):
     sampling_mode: str = Field("uniform", description='"uniform" | "recency_weighted" | "recent_only"')
     weight_strength: float = Field(3.0, description="Exponential steepness (recency_weighted mode only).")
     recent_window: int = Field(50, ge=1, description="Look-back in trading days (recent_only mode only).")
+    risk_multiplier: float = Field(1.0, gt=0, description="Scale factor for MT5 personal mode.")
     reset_cost: float = Field(137.0, ge=0, description="Account reset fee ($) used in EV calculation.")
     seed: Optional[int] = Field(None, description="RNG seed for reproducible results.")
+    starting_balance: float = Field(50_000.0, gt=0, description="MT5 personal mode: starting balance.")
+    overall_max_loss: float = Field(2_500.0, gt=0, description="MT5 personal mode: max absolute loss from start.")
+    daily_max_loss: float = Field(700.0, gt=0, description="MT5 personal mode: max daily loss.")
+    target_balance: float = Field(52_600.0, gt=0, description="MT5 personal mode: target account balance.")
+    time_limit_days: int = Field(90, ge=1, description="MT5 personal mode: calendar-day time constraint.")
+    weekends_tradable: bool = Field(False, description="MT5 personal mode: include weekends as tradable days.")
 
 
 class CorrelationRequest(BaseModel):
@@ -296,6 +748,12 @@ class MultiAccountRequest(BaseModel):
     recent_window: int = Field(50, ge=1, description="Look-back in trading days (recent_only mode only).")
     n_path_sims: int = Field(150, ge=0, description="Equity path samples to capture (for chart generation).")
     seed: Optional[int] = Field(None, description="RNG seed for reproducible results.")
+    starting_balance: float = Field(50_000.0, gt=0, description="MT5 personal mode: starting balance.")
+    overall_max_loss: float = Field(2_500.0, gt=0, description="MT5 personal mode: max absolute loss from start.")
+    daily_max_loss: float = Field(700.0, gt=0, description="MT5 personal mode: max daily loss.")
+    target_balance: float = Field(52_600.0, gt=0, description="MT5 personal mode: target account balance.")
+    time_limit_days: int = Field(30, ge=1, description="MT5 personal mode: calendar-day time constraint.")
+    weekends_tradable: bool = Field(False, description="MT5 personal mode: include weekends as tradable days.")
 
 
 class OptimizeRequest(BaseModel):
@@ -377,6 +835,7 @@ async def upload_strategy(file: UploadFile = File(...)) -> Any:
             "strategy_id": existing["strategy_id"],
             "filename":    existing["filename"],
             "path":        existing["path"],
+            "source":      existing.get("source", "tradingview"),
             "duplicate":   True,
         }
 
@@ -406,6 +865,7 @@ async def upload_strategy(file: UploadFile = File(...)) -> Any:
         "strategy_id": strategy_id,
         "filename":    file.filename,
         "path":        str(dest),
+        "source":      "tradingview",
         "duplicate":   False,
         "features":    features,
     }
@@ -443,12 +903,12 @@ def get_strategy_features_endpoint(strategy_id: str) -> Any:
 
 
 @app.get("/strategies", tags=["Strategies"], summary="List registered strategies")
-def list_strategies_endpoint() -> Any:
+def list_strategies_endpoint(source: Optional[str] = Query(None)) -> Any:
     """
     Return all previously uploaded strategies sorted by newest upload first.
     Each entry includes strategy_id, filename, path, uploaded_at, and file_hash.
     """
-    return strategy_db.list_strategies()
+    return strategy_db.list_strategies(source=source)
 
 
 @app.delete(
@@ -499,6 +959,26 @@ def endpoint_until_payout(req: UntilPayoutRequest) -> Any:
     """
     try:
         csv_path = _resolve_csv(req.csv_path, req.strategy_id)
+        if _is_mt5_strategy(req.strategy_id):
+            overrides = _mt5_overrides_from_request(req)
+            trades = _load_trade_results_from_strategy_csv(csv_path)
+            personal = run_trade_simulation_profile(
+                trades,
+                n_sims=req.n_sims,
+                stop_at_payout=True,
+                profile="personal",
+                config_overrides=overrides,
+            )
+            result = _map_personal_until_payout(
+                personal,
+                csv_path=csv_path,
+                n_sims=req.n_sims,
+                risk_multiplier=req.risk_multiplier,
+                max_days=overrides["max_days"],
+            )
+            if req.strategy_id:
+                _store_until_payout(req.strategy_id, result, req.n_sims)
+            return result
         result = analyze_until_payout(
             csv_path        = csv_path,
             n_sims          = req.n_sims,
@@ -541,6 +1021,27 @@ def endpoint_full_period(req: FullPeriodRequest) -> Any:
     """
     try:
         csv_path = _resolve_csv(req.csv_path, req.strategy_id)
+        if _is_mt5_strategy(req.strategy_id):
+            overrides = _mt5_overrides_from_request(req)
+            trades = _load_trade_results_from_strategy_csv(csv_path)
+            personal = run_trade_simulation_profile(
+                trades,
+                n_sims=req.n_sims,
+                stop_at_payout=False,
+                profile="personal",
+                config_overrides=overrides,
+            )
+            result = _map_personal_full_period(
+                personal,
+                csv_path=csv_path,
+                n_sims=req.n_sims,
+                risk_multiplier=req.risk_multiplier,
+                max_days=overrides["max_days"],
+                reset_cost=req.reset_cost,
+            )
+            if req.strategy_id:
+                _store_full_period(req.strategy_id, result, req.n_sims)
+            return result
         result = analyze_full_period(
             csv_path        = csv_path,
             n_sims          = req.n_sims,
@@ -580,16 +1081,19 @@ def endpoint_batch(req: BatchRequest) -> Any:
     entries rather than aborting the whole batch.
     """
     try:
-        csv_paths = _resolve_csv_list(req.csv_paths, req.strategy_ids)
-        results = run_batch(
-            csv_paths       = csv_paths,
-            n_sims          = req.n_sims,
-            sampling_mode   = req.sampling_mode,
-            weight_strength = req.weight_strength,
-            recent_window   = req.recent_window,
-            reset_cost      = req.reset_cost,
-            seed            = req.seed,
-        )
+        if req.strategy_ids and _sources_for_strategy_ids(req.strategy_ids) == {"mt5"}:
+            results = _run_personal_batch(req.strategy_ids, req)
+        else:
+            csv_paths = _resolve_csv_list(req.csv_paths, req.strategy_ids)
+            results = run_batch(
+                csv_paths       = csv_paths,
+                n_sims          = req.n_sims,
+                sampling_mode   = req.sampling_mode,
+                weight_strength = req.weight_strength,
+                recent_window   = req.recent_window,
+                reset_cost      = req.reset_cost,
+                seed            = req.seed,
+            )
         # Persist each batch row — match by csv filename, not by position,
         # because results are EV-sorted and no longer align with strategy_ids.
         if req.strategy_ids:
@@ -632,8 +1136,13 @@ async def endpoint_batch_stream(req: BatchRequest):
     ``{"type":"done","data":[...]}``
     ``{"type":"error","message":"..."}``
     """
+    mt5_personal_batch = False
+    csv_paths: List[str] = []
     try:
-        csv_paths = _resolve_csv_list(req.csv_paths, req.strategy_ids)
+        if req.strategy_ids and _sources_for_strategy_ids(req.strategy_ids) == {"mt5"}:
+            mt5_personal_batch = True
+        else:
+            csv_paths = _resolve_csv_list(req.csv_paths, req.strategy_ids)
     except Exception as exc:
         async def _err_gen():
             yield f"data: {_json.dumps({'type':'error','message':str(exc)})}\n\n"
@@ -665,19 +1174,25 @@ async def endpoint_batch_stream(req: BatchRequest):
 
     async def _run() -> None:
         try:
-            results = await loop.run_in_executor(
-                None,
-                lambda: run_batch(
-                    csv_paths       = csv_paths,
-                    n_sims          = req.n_sims,
-                    sampling_mode   = req.sampling_mode,
-                    weight_strength = req.weight_strength,
-                    recent_window   = req.recent_window,
-                    reset_cost      = req.reset_cost,
-                    seed            = req.seed,
-                    progress_cb     = _progress_cb,
-                ),
-            )
+            if mt5_personal_batch and req.strategy_ids:
+                results = await loop.run_in_executor(
+                    None,
+                    lambda: _run_personal_batch(req.strategy_ids or [], req, progress_cb=_progress_cb),
+                )
+            else:
+                results = await loop.run_in_executor(
+                    None,
+                    lambda: run_batch(
+                        csv_paths       = csv_paths,
+                        n_sims          = req.n_sims,
+                        sampling_mode   = req.sampling_mode,
+                        weight_strength = req.weight_strength,
+                        recent_window   = req.recent_window,
+                        reset_cost      = req.reset_cost,
+                        seed            = req.seed,
+                        progress_cb     = _progress_cb,
+                    ),
+                )
             if req.strategy_ids:
                 sid_map = _build_sid_map(req.strategy_ids)
                 for row in results:
@@ -795,19 +1310,31 @@ def endpoint_multi_account(req: MultiAccountRequest) -> Any:
     """
     try:
         csv_path = _resolve_csv(req.csv_path, req.strategy_id)
-        result = run_multi_account(
-            csv_path        = csv_path,
-            n_accounts      = req.n_accounts,
-            n_sims          = req.n_sims,
-            max_days        = req.max_days,
-            stop_at_payout  = req.stop_at_payout,
-            risk_multiplier = req.risk_multiplier,
-            sampling_mode   = req.sampling_mode,
-            weight_strength = req.weight_strength,
-            recent_window   = req.recent_window,
-            n_path_sims     = req.n_path_sims,
-            seed            = req.seed,
-        )
+        if _is_mt5_strategy(req.strategy_id):
+            overrides = _mt5_overrides_from_request(req)
+            trades = _load_trade_results_from_strategy_csv(csv_path)
+            result = _run_personal_multi_account(
+                trades=trades,
+                n_accounts=req.n_accounts,
+                n_sims=req.n_sims,
+                stop_at_payout=req.stop_at_payout,
+                n_path_sims=req.n_path_sims,
+                overrides=overrides,
+            )
+        else:
+            result = run_multi_account(
+                csv_path        = csv_path,
+                n_accounts      = req.n_accounts,
+                n_sims          = req.n_sims,
+                max_days        = req.max_days,
+                stop_at_payout  = req.stop_at_payout,
+                risk_multiplier = req.risk_multiplier,
+                sampling_mode   = req.sampling_mode,
+                weight_strength = req.weight_strength,
+                recent_window   = req.recent_window,
+                n_path_sims     = req.n_path_sims,
+                seed            = req.seed,
+            )
         if req.strategy_id:
             _store_multi_account(req.strategy_id, result, req.n_sims)
         return result
@@ -897,6 +1424,11 @@ def endpoint_optimize(req: OptimizeRequest) -> Any:
     - **n_strategies** – number of strategies included in the search
     """
     try:
+        if _sources_for_strategy_ids(req.strategy_ids) == {"mt5"}:
+            return _error(
+            "MT5 personal mode is not supported in optimizer yet. Use until_payout, full_period, batch, or multi_account for MT5.",
+            400,
+            )
         # ── Resolve strategy_ids → PnL arrays ────────────────────────────────
         strategy_pnl: Dict[str, Any] = {}
         for sid in req.strategy_ids:
@@ -969,6 +1501,11 @@ async def endpoint_optimize_stream(req: OptimizeRequest):
     ``{"type":"done","data":{...}}``
     ``{"type":"error","message":"..."}``
     """
+    if _sources_for_strategy_ids(req.strategy_ids) == {"mt5"}:
+        async def _err_gen():
+            yield f"data: {_json.dumps({'type':'error','message':'MT5 personal mode is not supported in optimizer yet. Use until_payout, full_period, batch, or multi_account for MT5.'})}\n\n"
+        return StreamingResponse(_err_gen(), media_type="text/event-stream")
+
     # Resolve strategies up front (fast) so we can report errors before streaming
     try:
         strategy_pnl: Dict[str, Any] = {}
@@ -1064,6 +1601,11 @@ async def endpoint_rescue(req: RescueRequest):
     the best chance of recovery when the account is under pressure.
     """
     try:
+        if _sources_for_strategy_ids(req.strategy_ids) == {"mt5"}:
+            return _error(
+                "MT5 personal mode is not supported in rescue yet. Use until_payout, full_period, batch, or multi_account for MT5.",
+                400,
+            )
         csv_paths: List[str] = []
         path_to_filename: Dict[str, str] = {}
         for sid in req.strategy_ids:

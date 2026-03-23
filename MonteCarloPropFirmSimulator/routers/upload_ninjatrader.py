@@ -1,4 +1,4 @@
-"""MT5 upload endpoint."""
+"""NinjaTrader CSV upload endpoint."""
 
 from __future__ import annotations
 
@@ -14,45 +14,39 @@ from fastapi import APIRouter, File, UploadFile
 from fastapi.responses import JSONResponse
 
 import strategy_db
-from services.mt5_parser_service import MT5ParserServiceError, parse_mt5_file
+from ninjatrader_csv_ingestion import parse_ninjatrader_trade_rows
 
 
 router = APIRouter(tags=["Upload"])
 
-_ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls", ".xlsm"}
 
+def _build_ninjatrader_canonical_csv(path: Path, rows: list[dict]) -> None:
+    """Write NinjaTrader trades to canonical strategy CSV expected by engines."""
+    known_times = [r.get("exit_time") for r in rows if r.get("exit_time") is not None]
+    if known_times:
+        start_fallback = min(known_times)
+    else:
+        start_fallback = (datetime.now(UTC) - timedelta(days=max(len(rows) - 1, 0))).replace(
+            hour=12, minute=0, second=0, microsecond=0
+        )
 
-def _build_mt5_canonical_csv(path: Path, trade_results: list[float]) -> None:
-    """Write MT5 trades to canonical strategy CSV format used by existing engines.
-
-    The analysis stack expects columns:
-      Type, Date and time, Net P&L USD
-
-    MT5 parser currently returns ordered realised trade PnL but not canonical timestamps,
-    so we synthesize deterministic chronological dates (oldest -> newest).
-    """
-    start_date = (datetime.now(UTC) - timedelta(days=max(len(trade_results) - 1, 0))).replace(
-        hour=12, minute=0, second=0, microsecond=0
-    )
     with path.open("w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         w.writerow(["Type", "Date and time", "Net P&L USD"])
-        for idx, pnl in enumerate(trade_results):
-            dt = start_date + timedelta(days=idx)
-            w.writerow(["Trade", dt.strftime("%Y-%m-%d %H:%M:%S"), f"{float(pnl):.2f}"])
+        for idx, row in enumerate(rows):
+            dt = row.get("exit_time") or (start_fallback + timedelta(days=idx))
+            w.writerow(["Trade", dt.strftime("%Y-%m-%d %H:%M:%S"), f"{float(row['pnl']):.2f}"])
 
 
-@router.post("/upload/mt5", summary="Upload MT5 report and register it for simulation")
-async def upload_mt5(file: UploadFile = File(...)):
+@router.post("/upload/ninjatrader", summary="Upload NinjaTrader trade report and register it for simulation")
+async def upload_ninjatrader(file: UploadFile = File(...)):
     filename = file.filename or "uploaded_report"
     extension = Path(filename).suffix.lower()
 
-    if extension not in _ALLOWED_EXTENSIONS:
+    if extension != ".csv":
         return JSONResponse(
             status_code=400,
-            content={
-                "error": "Invalid file type. Please upload .csv or .xlsx MT5 reports.",
-            },
+            content={"error": "Invalid file type. Please upload a NinjaTrader .csv trade report."},
         )
 
     temp_path: str | None = None
@@ -62,28 +56,36 @@ async def upload_mt5(file: UploadFile = File(...)):
             return JSONResponse(status_code=400, content={"error": "Uploaded file is empty."})
 
         file_hash = hashlib.sha256(data).hexdigest()
-        existing = strategy_db.find_by_hash_and_source(file_hash, "mt5")
+        existing = strategy_db.find_by_hash_and_source(file_hash, "ninjatrader")
         if existing is not None:
             return {
                 "strategy_id": existing["strategy_id"],
                 "filename": existing["filename"],
                 "path": existing["path"],
-                "source": "mt5",
+                "source": "ninjatrader",
                 "duplicate": True,
                 "num_trades": None,
                 "status": "uploaded",
             }
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=extension) as tmp:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".csv", mode="wb") as tmp:
             tmp.write(data)
             temp_path = tmp.name
 
-        parsed = parse_mt5_file(temp_path)
-        trade_results = [float(v) for v in parsed["trade_results"]]
+        try:
+            rows = parse_ninjatrader_trade_rows(temp_path)
+        except ValueError as exc:
+            return JSONResponse(status_code=400, content={"error": str(exc)})
 
-        strategy_id = f"mt5_{uuid4().hex}"
+        if not rows:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "No valid trades found in this NinjaTrader report."},
+            )
+
+        strategy_id = f"ninjatrader_{uuid4().hex}"
         dest = strategy_db.STRATEGIES_DIR / f"{strategy_id}.csv"
-        _build_mt5_canonical_csv(dest, trade_results)
+        _build_ninjatrader_canonical_csv(dest, rows)
         strategy_db.insert_strategy(
             strategy_id=strategy_id,
             filename=filename,
@@ -93,22 +95,20 @@ async def upload_mt5(file: UploadFile = File(...)):
         )
 
         return {
-            "report_type": parsed["report_type"],
+            "report_type": "ninjatrader",
             "strategy_id": strategy_id,
             "filename": filename,
             "path": str(dest),
-            "source": "mt5",
+            "source": "ninjatrader",
             "duplicate": False,
-            "num_trades": len(trade_results),
+            "num_trades": len(rows),
             "status": "uploaded",
         }
 
-    except MT5ParserServiceError as exc:
-        return JSONResponse(status_code=400, content={"error": str(exc)})
     except Exception:
         return JSONResponse(
             status_code=400,
-            content={"error": "Could not process this file. Please upload a valid MT5 report."},
+            content={"error": "Could not process this file. Please upload a valid NinjaTrader trade report."},
         )
     finally:
         await file.close()

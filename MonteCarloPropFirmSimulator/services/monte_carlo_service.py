@@ -1,4 +1,4 @@
-"""Service wrapper to run challenge Monte Carlo from trade-level PnL input."""
+"""Service wrapper to run Monte Carlo from trade-level PnL input."""
 
 from __future__ import annotations
 
@@ -34,8 +34,50 @@ DEFAULT_CONFIG: dict[str, Any] = {
 }
 
 
-def run_trade_simulation(trade_results: list[float], n_sims: int = 10_000) -> dict:
-    """Run a Monte Carlo challenge simulation from per-trade PnL values."""
+def _build_config(
+    *,
+    n_sims: int,
+    profile: str,
+    config_overrides: dict[str, Any] | None,
+) -> dict[str, Any]:
+    config = dict(DEFAULT_CONFIG)
+    config["n_sims"] = int(max(100, n_sims))
+    if config_overrides:
+        for k, v in config_overrides.items():
+            if v is not None:
+                config[k] = v
+
+    if profile == "personal":
+        # Personal-account mode: static floor + no prop payout eligibility gates.
+        account_size = float(config["account_size"])
+        overall_max_loss = float(config.get("overall_max_loss", config["trailing_dd"]))
+        overall_max_loss = max(1.0, overall_max_loss)
+
+        config["trailing_dd"] = overall_max_loss
+        config["trail_stop_level"] = account_size - overall_max_loss
+        config["safety_net_level"] = account_size
+        config["max_payout_limit"] = 1_000_000_000.0
+        config["min_days"] = 1
+        config["min_green_days"] = 0
+        config["green_day_min"] = 0.0
+        config["max_losing_per_day"] = 10_000
+        config["max_winning_per_day"] = 10_000
+
+        daily_loss = float(config.get("daily_loss_limit", 700.0))
+        config["daily_loss_limit"] = abs(daily_loss)
+
+    return config
+
+
+def run_trade_simulation_profile(
+    trade_results: list[float],
+    *,
+    n_sims: int = 10_000,
+    stop_at_payout: bool = True,
+    profile: str = "prop",
+    config_overrides: dict[str, Any] | None = None,
+) -> dict:
+    """Run a Monte Carlo simulation from per-trade PnL values with profile overrides."""
     clean = [float(v) for v in trade_results if v is not None]
     if not clean:
         raise MonteCarloServiceError("This MT5 report contains no trades.")
@@ -45,11 +87,14 @@ def run_trade_simulation(trade_results: list[float], n_sims: int = 10_000) -> di
             "This MT5 report contains too few trades for reliable simulation."
         )
 
-    config = dict(DEFAULT_CONFIG)
-    config["n_sims"] = int(max(100, n_sims))
+    config = _build_config(
+        n_sims=n_sims,
+        profile=profile,
+        config_overrides=config_overrides,
+    )
 
     try:
-        mc = run_monte_carlo(np.asarray(clean, dtype=float), config, stop_at_payout=True)
+        mc = run_monte_carlo(np.asarray(clean, dtype=float), config, stop_at_payout=stop_at_payout)
     except Exception as exc:
         raise MonteCarloServiceError("Simulation failed for this trade set.") from exc
 
@@ -68,9 +113,27 @@ def run_trade_simulation(trade_results: list[float], n_sims: int = 10_000) -> di
     expected_payout = float(np.mean(payout_values)) if payout_values else 0.0
 
     return {
+        "profile": profile,
+        "config": config,
         "num_trades": len(clean),
         "pass_probability": round(pass_probability, 4),
         "blow_probability": round(blow_probability, 4),
+        "timeout_probability": round(max(0.0, 1.0 - pass_probability - blow_probability), 4),
         "expected_payout": round(expected_payout, 2),
+        "outcomes": outcomes,
+        "payouts": payouts,
+        "balances": [float(v) for v in mc.get("balances", [])],
+        "days": [int(v) for v in mc.get("days", [])],
+        "paths": [list(map(float, p)) for p in mc.get("paths", [])],
         "trade_sample": [round(v, 2) for v in clean[:3]],
     }
+
+
+def run_trade_simulation(trade_results: list[float], n_sims: int = 10_000) -> dict:
+    """Backward-compatible prop profile wrapper used by existing upload handlers."""
+    return run_trade_simulation_profile(
+        trade_results,
+        n_sims=n_sims,
+        stop_at_payout=True,
+        profile="prop",
+    )

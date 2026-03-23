@@ -72,6 +72,27 @@ def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
     return dict(row)
 
 
+def infer_strategy_source(strategy_id: str) -> str:
+    """Infer strategy source from ID prefix.
+
+    Convention:
+      - mt5_<uuid>          -> mt5
+      - ninjatrader_<uuid>  -> ninjatrader
+      - everything else     -> tradingview
+    """
+    if strategy_id.startswith("mt5_"):
+        return "mt5"
+    if strategy_id.startswith("ninjatrader_"):
+        return "ninjatrader"
+    return "tradingview"
+
+
+def _attach_source(row: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(row)
+    out["source"] = infer_strategy_source(str(out.get("strategy_id", "")))
+    return out
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Initialisation
 # ─────────────────────────────────────────────────────────────────────────────
@@ -179,7 +200,7 @@ def get_strategy(strategy_id: str) -> Optional[Dict[str, Any]]:
             "SELECT * FROM strategies WHERE strategy_id = ?",
             (strategy_id,),
         ).fetchone()
-    return _row_to_dict(row) if row else None
+    return _attach_source(_row_to_dict(row)) if row else None
 
 
 def find_by_hash(file_hash: str) -> Optional[Dict[str, Any]]:
@@ -192,16 +213,29 @@ def find_by_hash(file_hash: str) -> Optional[Dict[str, Any]]:
             "SELECT * FROM strategies WHERE file_hash = ? LIMIT 1",
             (file_hash,),
         ).fetchone()
-    return _row_to_dict(row) if row else None
+    return _attach_source(_row_to_dict(row)) if row else None
 
 
-def list_strategies() -> List[Dict[str, Any]]:
-    """Return all strategies sorted by upload time (newest first)."""
+def find_by_hash_and_source(file_hash: str, source: str) -> Optional[Dict[str, Any]]:
+    """Return the first strategy matching *file_hash* and inferred *source*."""
+    rows = list_strategies(source=source)
+    for row in rows:
+        if row.get("file_hash") == file_hash:
+            return row
+    return None
+
+
+def list_strategies(source: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Return strategies sorted by upload time (newest first), optionally source-filtered."""
     with _connect() as conn:
         rows = conn.execute(
             "SELECT * FROM strategies ORDER BY uploaded_at DESC"
         ).fetchall()
-    return [_row_to_dict(r) for r in rows]
+    out = [_attach_source(_row_to_dict(r)) for r in rows]
+    if not source:
+        return out
+    source_norm = source.strip().lower()
+    return [r for r in out if r.get("source") == source_norm]
 
 
 def delete_strategy(strategy_id: str) -> bool:
