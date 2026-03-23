@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NinjaTrader Simulator - Monte Carlo Prop Firm Simulator</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: #0B0B0F;
+            color: #e0e0e0;
+            min-height: 100vh;
+            padding: 1rem;
+        }
+
+        .mode-banner {
+            background: rgba(100, 200, 255, 0.15);
+            border: 1px solid rgba(100, 200, 255, 0.45);
+            border-radius: 8px;
+            padding: 0.8rem 1rem;
+            margin-bottom: 1.5rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .mode-banner span {
+            font-size: 0.9rem;
+            color: #64c8ff;
+            font-weight: 600;
+        }
+
+        .mode-links {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+
+        .mode-links a {
+            font-size: 0.78rem;
+            padding: 0.3rem 0.7rem;
+            border-radius: 6px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            background: transparent;
+            color: #666;
+            text-decoration: none;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .mode-links a:hover {
+            border-color: rgba(100, 200, 255, 0.4);
+            color: #aaa;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="mode-banner">
+        <span>⚙️ NinjaTrader Prop Account Mode</span>
+        <div class="mode-links">
+            <a href="simulator-mt5.html">Switch to MT5</a>
+            <a href="simulator-tradingview.html">Switch to TradingView</a>
+        </div>
+    </div>
+    <iframe src="simulator-ui.html?uploadMode=ninjatrader"
+        style="width:100%;height:calc(100vh - 120px);border:none;border-radius:8px"></iframe>
+</body>
+
+</html>
