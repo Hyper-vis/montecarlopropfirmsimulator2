@@ -826,6 +826,11 @@ async def upload_strategy(file: UploadFile = File(...)) -> Any:
     content = await file.read()
     await file.close()
 
+    # Validate file size (100 MB max)
+    file_size_mb = len(content) / (1024 * 1024)
+    if file_size_mb > 100:
+        return _error(f"File is too large ({file_size_mb:.1f} MB). Maximum allowed: 100 MB", 413)
+
     file_hash = hashlib.sha256(content).hexdigest()
 
     # ── Deduplication check ──────────────────────────────────────────────────

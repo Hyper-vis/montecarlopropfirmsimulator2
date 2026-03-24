@@ -60,6 +60,14 @@ async def upload_mt5(file: UploadFile = File(...)):
         data = await file.read()
         if not data:
             return JSONResponse(status_code=400, content={"error": "Uploaded file is empty."})
+        
+        # Validate file size (100 MB max)
+        file_size_mb = len(data) / (1024 * 1024)
+        if file_size_mb > 100:
+            return JSONResponse(
+                status_code=413,
+                content={"error": f"File is too large ({file_size_mb:.1f} MB). Maximum allowed: 100 MB."}
+            )
 
         file_hash = hashlib.sha256(data).hexdigest()
         existing = strategy_db.find_by_hash_and_source(file_hash, "mt5")
