@@ -1,7 +1,7 @@
 'use client';
 
 import { LogoutButton } from '@/components/LogoutButton';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 export default function MT5Simulator() {
     const [config, setConfig] = useState({
@@ -12,6 +12,22 @@ export default function MT5Simulator() {
         time_limit_days: 7,
         weekends_tradable: false
     });
+    const iframeRef = useRef<HTMLIFrameElement | null>(null);
+
+    const syncConfigToIframe = () => {
+        if (!iframeRef.current?.contentWindow) return;
+        iframeRef.current.contentWindow.postMessage(
+            {
+                type: 'MT5_CONFIG_UPDATE',
+                payload: config
+            },
+            window.location.origin
+        );
+    };
+
+    useEffect(() => {
+        syncConfigToIframe();
+    }, [config]);
 
     return (
         <div style={{ width: '100%', height: '100vh', display: 'flex', flexDirection: 'column', background: '#0B0B0F' }}>
@@ -177,7 +193,9 @@ export default function MT5Simulator() {
             </div>
 
             <iframe
+                ref={iframeRef}
                 src="/simulator-ui.html?uploadMode=mt5"
+                onLoad={syncConfigToIframe}
                 style={{ flex: 1, border: 'none', borderRadius: '8px', margin: '0.5rem 1rem 1rem 1rem' }}
             />
         </div>

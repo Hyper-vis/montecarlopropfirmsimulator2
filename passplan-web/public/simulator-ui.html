@@ -799,41 +799,6 @@
                     <input id="n_accounts" type="number" min="1" value="5" />
                 </div>
 
-                <!-- -- MT5 personal account profile inputs -- -->
-                <div id="mt5-personal-wrap" class="extra-field" style="display:none">
-                    <label style="margin-bottom:0.4rem;color:#FF9A45">MT5 Personal Account Inputs</label>
-                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.7rem">
-                        <div>
-                            <label for="mt5-starting-balance">Starting Balance ($)</label>
-                            <input id="mt5-starting-balance" type="number" min="1" step="0.01" value="10000" />
-                        </div>
-                        <div>
-                            <label for="mt5-target-balance">Target Balance ($)</label>
-                            <input id="mt5-target-balance" type="number" min="1" step="0.01" value="15000" />
-                        </div>
-                        <div>
-                            <label for="mt5-overall-max-loss">Overall Max Loss ($)</label>
-                            <input id="mt5-overall-max-loss" type="number" min="1" step="0.01" value="3000" />
-                        </div>
-                        <div>
-                            <label for="mt5-daily-max-loss">Daily Max Loss ($)</label>
-                            <input id="mt5-daily-max-loss" type="number" min="1" step="0.01" value="1000" />
-                        </div>
-                        <div>
-                            <label for="mt5-time-limit-days">Time Limit (calendar days)</label>
-                            <input id="mt5-time-limit-days" type="number" min="1" step="1" value="7" />
-                        </div>
-                        <div style="display:flex;align-items:flex-end;gap:0.45rem;padding-bottom:0.35rem">
-                            <input id="mt5-weekends-tradable" type="checkbox"
-                                style="width:auto;transform:translateY(-1px)" />
-                            <label for="mt5-weekends-tradable" style="margin:0">Weekends tradable</label>
-                        </div>
-                    </div>
-                    <div style="font-size:0.72rem;color:#666;margin-top:0.45rem">
-                        Applied automatically when selected strategy source is MT5.
-                    </div>
-                </div>
-
                 <!-- -- Optimizer: strategy checkboxes + parameters -- -->
                 <div id="field-optimizer" class="extra-field">
                     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.35rem">
@@ -1040,6 +1005,29 @@
         let currentEp = "until_payout";
         let chartModeActive = false;
         let lastSimData = null;
+        let mt5Config = {
+            starting_balance: 10000,
+            overall_max_loss: 3000,
+            daily_max_loss: 1000,
+            target_balance: 15000,
+            time_limit_days: 7,
+            weekends_tradable: false,
+        };
+
+        window.addEventListener("message", (event) => {
+            if (event.origin !== window.location.origin) return;
+            if (!event.data || event.data.type !== "MT5_CONFIG_UPDATE") return;
+
+            const payload = event.data.payload || {};
+            mt5Config = {
+                starting_balance: Number(payload.starting_balance) || 10000,
+                overall_max_loss: Number(payload.overall_max_loss) || 3000,
+                daily_max_loss: Number(payload.daily_max_loss) || 1000,
+                target_balance: Number(payload.target_balance) || 15000,
+                time_limit_days: Number(payload.time_limit_days) || 7,
+                weekends_tradable: !!payload.weekends_tradable,
+            };
+        });
 
         function applyUploadModeUI() {
             const labelEl = document.getElementById("upload-area-label");
@@ -1469,7 +1457,6 @@
             setVisible("field-csv_paths", isBatch);
             setVisible("field-strategies", isCorr);
             setVisible("field-n_accounts", isMulti);
-            setVisible("mt5-personal-wrap", uploadMode === "mt5");
             setVisible("field-optimizer", isOpt);
             setVisible("field-leaderboard", isLb);
             setVisible("field-rescue", isRescue);
@@ -1521,12 +1508,12 @@
             if (uploadMode !== "mt5") return body;
             return {
                 ...body,
-                starting_balance: parseFloat(document.getElementById("mt5-starting-balance").value) || 10000,
-                overall_max_loss: parseFloat(document.getElementById("mt5-overall-max-loss").value) || 3000,
-                daily_max_loss: parseFloat(document.getElementById("mt5-daily-max-loss").value) || 1000,
-                target_balance: parseFloat(document.getElementById("mt5-target-balance").value) || 15000,
-                time_limit_days: parseInt(document.getElementById("mt5-time-limit-days").value) || 7,
-                weekends_tradable: !!document.getElementById("mt5-weekends-tradable").checked,
+                starting_balance: mt5Config.starting_balance,
+                overall_max_loss: mt5Config.overall_max_loss,
+                daily_max_loss: mt5Config.daily_max_loss,
+                target_balance: mt5Config.target_balance,
+                time_limit_days: mt5Config.time_limit_days,
+                weekends_tradable: mt5Config.weekends_tradable,
             };
         }
 
