@@ -7,7 +7,7 @@ from pathlib import Path
 from mt5_csv_ingestion import (
     MT5ParseError,
     detect_mt5_report_type,
-    parse_mt5_trade_results,
+    parse_mt5_trade_records,
 )
 
 
@@ -23,16 +23,17 @@ def parse_mt5_file(file_path: str | Path) -> dict:
 
     try:
         report_type = detect_mt5_report_type(path)
-        trade_results = parse_mt5_trade_results(path)
+        trade_rows = parse_mt5_trade_records(path)
     except MT5ParseError as exc:
         raise MT5ParserServiceError("Invalid MT5 report format.") from exc
     except Exception as exc:
         raise MT5ParserServiceError("Could not read this file. It may be corrupted.") from exc
 
-    if not trade_results:
+    if not trade_rows:
         raise MT5ParserServiceError("This MT5 report contains no closed trades.")
 
     return {
         "report_type": report_type,
-        "trade_results": [float(v) for v in trade_results],
+        "trade_results": [float(v.get("pnl", 0.0)) for v in trade_rows],
+        "trade_rows": trade_rows,
     }

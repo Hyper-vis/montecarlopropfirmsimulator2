@@ -66,6 +66,8 @@ from portfolio_optimizer import (
     find_optimal_portfolios,
 )
 from services.monte_carlo_service import run_trade_simulation_profile
+from services.monte_carlo_service import run_daily_simulation_profile
+from apex_engine_v3_1 import load_daily_pnl as load_mt5_daily_pnl
 from routers.upload_mt5 import router as upload_mt5_router
 from routers.upload_ninjatrader import router as upload_ninjatrader_router
 
@@ -209,6 +211,26 @@ def _mt5_overrides_from_request(req: Any) -> dict[str, Any]:
         "max_days": _calendar_to_trading_days(days, weekends),
         "risk_multiplier": risk,
     }
+
+
+def _run_mt5_personal_simulation(
+    csv_path: str,
+    req: Any,
+    *,
+    stop_at_payout: bool,
+    progress_cb: Any = None,
+) -> tuple[dict, dict[str, Any]]:
+    overrides = _mt5_overrides_from_request(req)
+    daily_pnl = load_mt5_daily_pnl(csv_path)
+    personal = run_daily_simulation_profile(
+        daily_pnl.tolist() if hasattr(daily_pnl, "tolist") else list(daily_pnl),
+        n_sims=req.n_sims,
+        stop_at_payout=stop_at_payout,
+        profile="personal",
+        config_overrides=overrides,
+        progress_cb=progress_cb,
+    )
+    return personal, overrides
 
 
 def _map_personal_until_payout(mc: dict, *, csv_path: str, n_sims: int, risk_multiplier: float, max_days: int) -> dict:
@@ -974,14 +996,10 @@ def endpoint_until_payout(req: UntilPayoutRequest) -> Any:
     try:
         csv_path = _resolve_csv(req.csv_path, req.strategy_id)
         if _is_mt5_strategy(req.strategy_id):
-            overrides = _mt5_overrides_from_request(req)
-            trades = _load_trade_results_from_strategy_csv(csv_path)
-            personal = run_trade_simulation_profile(
-                trades,
-                n_sims=req.n_sims,
+            personal, overrides = _run_mt5_personal_simulation(
+                csv_path,
+                req,
                 stop_at_payout=True,
-                profile="personal",
-                config_overrides=overrides,
             )
             result = _map_personal_until_payout(
                 personal,
@@ -1030,14 +1048,10 @@ async def _stream_single_strategy(req: Any, *, mode: str):
 
         if mode == "until_payout":
             if _is_mt5_strategy(req.strategy_id):
-                overrides = _mt5_overrides_from_request(req)
-                trades = _load_trade_results_from_strategy_csv(csv_path)
-                personal = run_trade_simulation_profile(
-                    trades,
-                    n_sims=req.n_sims,
+                personal, overrides = _run_mt5_personal_simulation(
+                    csv_path,
+                    req,
                     stop_at_payout=True,
-                    profile="personal",
-                    config_overrides=overrides,
                     progress_cb=_progress_cb,
                 )
                 result = _map_personal_until_payout(
@@ -1068,14 +1082,10 @@ async def _stream_single_strategy(req: Any, *, mode: str):
 
         if mode == "full_period":
             if _is_mt5_strategy(req.strategy_id):
-                overrides = _mt5_overrides_from_request(req)
-                trades = _load_trade_results_from_strategy_csv(csv_path)
-                personal = run_trade_simulation_profile(
-                    trades,
-                    n_sims=req.n_sims,
+                personal, overrides = _run_mt5_personal_simulation(
+                    csv_path,
+                    req,
                     stop_at_payout=False,
-                    profile="personal",
-                    config_overrides=overrides,
                     progress_cb=_progress_cb,
                 )
                 result = _map_personal_full_period(
@@ -1171,14 +1181,10 @@ def endpoint_full_period(req: FullPeriodRequest) -> Any:
     try:
         csv_path = _resolve_csv(req.csv_path, req.strategy_id)
         if _is_mt5_strategy(req.strategy_id):
-            overrides = _mt5_overrides_from_request(req)
-            trades = _load_trade_results_from_strategy_csv(csv_path)
-            personal = run_trade_simulation_profile(
-                trades,
-                n_sims=req.n_sims,
+            personal, overrides = _run_mt5_personal_simulation(
+                csv_path,
+                req,
                 stop_at_payout=False,
-                profile="personal",
-                config_overrides=overrides,
             )
             result = _map_personal_full_period(
                 personal,

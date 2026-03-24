@@ -460,6 +460,47 @@ def _extract_realized_pnl_from_table(table: pd.DataFrame) -> list[float]:
     return pnls
 
 
+def _extract_realized_trade_records_from_table(table: pd.DataFrame) -> list[dict[str, Any]]:
+    columns = [_norm_header(c) for c in table.columns.tolist()]
+    rename_map = {old: new for old, new in zip(table.columns.tolist(), columns)}
+    df = table.rename(columns=rename_map)
+
+    profit_col = _find_col(df.columns, _PROFIT_HINTS)
+    if not profit_col:
+        return []
+
+    type_col = _find_col(df.columns, ["type", "action", "deal type"])
+    entry_col = _find_col(df.columns, _ENTRY_HINTS)
+    ticket_col = _find_col(df.columns, ["ticket", "deal", "order"])
+    time_cols = [col for col in df.columns if "time" in col or "date" in col]
+    symbol_col = _find_col(df.columns, ["symbol", "instrument", "asset"])
+
+    records: list[dict[str, Any]] = []
+    for _, row in df.iterrows():
+        pnl = _parse_number(row.get(profit_col, ""))
+        if pnl is None:
+            continue
+        if not _is_realized_trade_row(row, type_col, entry_col, ticket_col, None, symbol_col):
+            continue
+
+        timestamp = None
+        for col in reversed(time_cols):
+            raw_ts = row.get(col, "")
+            if not _norm_text(raw_ts):
+                continue
+            parsed = pd.to_datetime(raw_ts, errors="coerce")
+            if pd.notna(parsed):
+                timestamp = pd.Timestamp(parsed).isoformat()
+                break
+
+        records.append({
+            "timestamp": timestamp,
+            "pnl": float(pnl),
+        })
+
+    return records
+
+
 def _detect_from_tokens(tokens: str, candidates: list[_CandidateTable]) -> ReportType:
     strategy_markers = (
         "strategy tester report",
@@ -559,3 +600,43 @@ def parse_mt5_trade_results(source: str | Path | bytes | IO[str] | IO[bytes]) ->
         )
 
     return [float(v) for v in best_pnls]
+
+
+def parse_mt5_trade_records(source: str | Path | bytes | IO[str] | IO[bytes]) -> list[dict[str, Any]]:
+    """Parse an MT5 export and return realized trade rows with timestamps.
+
+    The returned list preserves the original trade order when timestamps are
+    missing.  When timestamps are available, callers can sort chronologically.
+    """
+    frames = _source_to_raw_frames(source)
+    candidates, _ = _collect_candidates(frames)
+
+    if not candidates:
+        raise MT5ParseError("No valid MT5 trade table detected in source file.")
+
+    best_records: list[dict[str, Any]] = []
+    best_score = -1
+
+    for candidate in candidates:
+        records = _extract_realized_trade_records_from_table(candidate.table)
+        score = (len(records) * 100) + candidate.score
+        if records and score > best_score:
+            best_records = records
+            best_score = score
+
+    if not best_records:
+        raise MT5ParseError(
+            "No realized trade profit values found. "
+            "Ensure the CSV contains a trade/deals table with a Profit/PnL column."
+        )
+
+    if any(record.get("timestamp") for record in best_records):
+        best_records = sorted(
+            best_records,
+            key=lambda record: (
+                record.get("timestamp") is None,
+                record.get("timestamp") or "",
+            ),
+        )
+
+    return best_records

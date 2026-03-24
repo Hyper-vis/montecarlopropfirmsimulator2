@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
+import pandas as pd
 from fastapi import APIRouter, File, UploadFile
 from fastapi.responses import JSONResponse
 
@@ -22,24 +23,36 @@ router = APIRouter(tags=["Upload"])
 _ALLOWED_EXTENSIONS = {".csv", ".xlsx", ".xls", ".xlsm"}
 
 
-def _build_mt5_canonical_csv(path: Path, trade_results: list[float]) -> None:
+def _build_mt5_canonical_csv(path: Path, trade_rows: list[dict]) -> None:
     """Write MT5 trades to canonical strategy CSV format used by existing engines.
 
     The analysis stack expects columns:
       Type, Date and time, Net P&L USD
 
-    MT5 parser currently returns ordered realised trade PnL but not canonical timestamps,
-    so we synthesize deterministic chronological dates (oldest -> newest).
+    MT5 parser returns the realized trade rows and timestamps, so we preserve the
+    original close time for each trade when possible.
     """
-    start_date = (datetime.now(UTC) - timedelta(days=max(len(trade_results) - 1, 0))).replace(
+    if not trade_rows:
+        raise ValueError("No MT5 trade rows were provided.")
+
+    frame = pd.DataFrame(trade_rows)
+    if "timestamp" in frame.columns:
+        frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce", format="mixed")
+        frame = frame.sort_values(["timestamp"], na_position="last").reset_index(drop=True)
+
+    fallback_start = (datetime.now(UTC) - timedelta(days=max(len(frame) - 1, 0))).replace(
         hour=12, minute=0, second=0, microsecond=0
     )
+
     with path.open("w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
         w.writerow(["Type", "Date and time", "Net P&L USD"])
-        for idx, pnl in enumerate(trade_results):
-            dt = start_date + timedelta(days=idx)
-            w.writerow(["Trade", dt.strftime("%Y-%m-%d %H:%M:%S"), f"{float(pnl):.2f}"])
+        for idx, row in frame.iterrows():
+            ts = row.get("timestamp")
+            if pd.isna(ts):
+                ts = fallback_start + timedelta(seconds=int(idx))
+            pnl = float(row.get("pnl", 0.0))
+            w.writerow(["Trade", pd.Timestamp(ts).strftime("%Y-%m-%d %H:%M:%S"), f"{pnl:.2f}"])
 
 
 @router.post("/upload/mt5", summary="Upload MT5 report and register it for simulation")
@@ -79,11 +92,12 @@ async def upload_mt5(file: UploadFile = File(...)):
             temp_path = tmp.name
 
         parsed = parse_mt5_file(temp_path)
+        trade_rows = parsed.get("trade_rows") or []
         trade_results = [float(v) for v in parsed["trade_results"]]
 
         strategy_id = f"mt5_{uuid4().hex}"
         dest = strategy_db.STRATEGIES_DIR / f"{strategy_id}.csv"
-        _build_mt5_canonical_csv(dest, trade_results)
+        _build_mt5_canonical_csv(dest, trade_rows)
         strategy_db.insert_strategy(
             strategy_id=strategy_id,
             filename=filename,
