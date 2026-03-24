@@ -184,11 +184,13 @@ def simulate_path(trade_pnls: np.ndarray, config: dict, stop_at_payout: bool = T
         # Payout eligibility check
         if balance >= config["payout_threshold"]:
             total_profit = balance - config["account_size"]
+            require_consistency = bool(config.get("require_consistency_rule", True))
+            consistency_ok = (not require_consistency) or (max_day_pnl <= 0.30 * total_profit)
 
             if (trading_days >= config["min_days"] and
                 green_days   >= config["min_green_days"] and
                 total_profit >  0 and
-                max_day_pnl  <= 0.30 * total_profit):
+                consistency_ok):
 
                 withdrawable = balance - config["safety_net_level"]
                 if withdrawable >= 500:

@@ -214,8 +214,9 @@ def _mt5_overrides_from_request(req: Any) -> dict[str, Any]:
 def _map_personal_until_payout(mc: dict, *, csv_path: str, n_sims: int, risk_multiplier: float, max_days: int) -> dict:
     payouts = [float(v) for v in mc.get("payouts", [])]
     days = [int(v) for v in mc.get("days", [])]
-    payout_days = [d for o, d in zip(mc.get("outcomes", []), days) if o == "payout"]
-    mean_payout = float(np.mean([p for p in payouts if p > 0])) if any(p > 0 for p in payouts) else 0.0
+    target_days = [int(v) for v in mc.get("target_achieved_days", [])]
+    target_prob = float(mc.get("target_achieved_probability", mc.get("pass_probability", 0.0)))
+    mean_target_gain = float(mc.get("expected_payout", 0.0))
 
     return {
         "metadata": {
@@ -227,17 +228,19 @@ def _map_personal_until_payout(mc: dict, *, csv_path: str, n_sims: int, risk_mul
             "weight_strength": 0.0,
             "recent_window": 0,
             "profile": "mt5_personal",
+            "primary_success_label": "target_achieved",
         },
         "probabilities": {
-            "payout_prob": mc.get("pass_probability", 0.0),
+            "payout_prob": target_prob,
+            "target_achieved_prob": target_prob,
             "blow_prob": mc.get("blow_probability", 0.0),
             "timeout_prob": mc.get("timeout_probability", 0.0),
         },
         "metrics": {
             "mean_days_all": float(np.mean(days)) if days else 0.0,
-            "mean_days_to_payout": float(np.mean(payout_days)) if payout_days else 0.0,
-            "median_days_to_payout": int(np.median(payout_days)) if payout_days else 0,
-            "mean_payout": mean_payout,
+            "mean_days_to_payout": float(np.mean(target_days)) if target_days else 0.0,
+            "median_days_to_payout": int(np.median(target_days)) if target_days else 0,
+            "mean_payout": mean_target_gain,
             "tier_label": "PERSONAL",
             "tier_description": "Personal account mode with user-defined balance, loss, target and time rules.",
         },
@@ -245,7 +248,7 @@ def _map_personal_until_payout(mc: dict, *, csv_path: str, n_sims: int, risk_mul
             "equity_paths": mc.get("paths", []),
         },
         "recency": {
-            "overall_pass_probability": mc.get("pass_probability", 0.0),
+            "overall_pass_probability": target_prob,
             "recent_pass_probability": None,
             "probability_delta": None,
             "recency_status": "n/a",
@@ -266,14 +269,16 @@ def _map_personal_full_period(
     outcomes = list(mc.get("outcomes", []))
     payouts = [float(v) for v in mc.get("payouts", [])]
     balances = [float(v) for v in mc.get("balances", [])]
+    target_prob = float(mc.get("target_achieved_probability", mc.get("pass_probability", 0.0)))
+    target_days = [int(v) for v in mc.get("target_achieved_days", [])]
     n = max(1, len(outcomes))
 
     payout_then_blew = sum(1 for o, p in zip(outcomes, payouts) if o == "blow" and p > 0)
     payout_survived = sum(1 for o, p in zip(outcomes, payouts) if o != "blow" and p > 0)
     blow_no_payout = outcomes.count("blow") - payout_then_blew
-    timeout_no_pay = sum(1 for o, p in zip(outcomes, payouts) if o == "timeout" and p == 0)
+    timeout_no_pay = max(0.0, 1.0 - target_prob - float(mc.get("blow_probability", 0.0)))
     winning_payouts = [p for p in payouts if p > 0]
-    pass_rate = float(mc.get("pass_probability", 0.0))
+    pass_rate = target_prob
     fail_rate = float(mc.get("blow_probability", 0.0))
     avg_blow_loss = 0.0
     account_size = float(mc.get("config", {}).get("account_size", 0.0))
@@ -295,19 +300,22 @@ def _map_personal_full_period(
             "weight_strength": 0.0,
             "recent_window": 0,
             "profile": "mt5_personal",
+            "primary_success_label": "target_achieved",
         },
         "probabilities": {
             "payout_prob": pass_rate,
+            "target_achieved_prob": pass_rate,
             "payout_survived_prob": payout_survived / n,
             "payout_then_blew_prob": payout_then_blew / n,
             "blow_no_payout_prob": blow_no_payout / n,
-            "timeout_no_pay_prob": timeout_no_pay / n,
+            "timeout_no_pay_prob": timeout_no_pay,
         },
         "metrics": {
             "mean_ending_balance": float(np.mean(balances)) if balances else 0.0,
             "mean_blow_loss": avg_blow_loss,
             "mean_payout": mean_payout,
             "median_payout": median_payout,
+            "mean_days_to_payout": float(np.mean(target_days)) if target_days else 0.0,
             "e_monthly": e_monthly,
             "tier_label": "PERSONAL",
             "tier_description": "Personal account mode with user-defined balance, loss, target and time rules.",
