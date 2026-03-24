@@ -57,11 +57,13 @@ def _build_config(
         config["trail_stop_level"] = account_size - overall_max_loss
         config["safety_net_level"] = account_size
         config["max_payout_limit"] = 1_000_000_000.0
+        config["daily_profit_cap"] = 1_000_000_000.0
         config["min_days"] = 1
         config["min_green_days"] = 0
         config["green_day_min"] = 0.0
         config["max_losing_per_day"] = 10_000
         config["max_winning_per_day"] = 10_000
+        config["require_consistency_rule"] = False
 
         daily_loss = float(config.get("daily_loss_limit", 700.0))
         config["daily_loss_limit"] = abs(daily_loss)
@@ -100,17 +102,42 @@ def run_trade_simulation_profile(
 
     outcomes = list(mc.get("outcomes", []))
     payouts = [float(v) for v in mc.get("payouts", [])]
+    balances = [float(v) for v in mc.get("balances", [])]
+    paths = [list(map(float, p)) for p in mc.get("paths", [])]
+    days = [int(v) for v in mc.get("days", [])]
     n = len(outcomes) if outcomes else int(config["n_sims"])
     if n <= 0:
         raise MonteCarloServiceError("Simulation returned no outcomes.")
 
     payout_count = outcomes.count("payout")
     blow_count = outcomes.count("blow")
-    payout_values = [p for p in payouts if p > 0]
-
     pass_probability = payout_count / n
     blow_probability = blow_count / n
-    expected_payout = float(np.mean(payout_values)) if payout_values else 0.0
+    timeout_probability = max(0.0, 1.0 - pass_probability - blow_probability)
+    expected_payout = float(np.mean([p for p in payouts if p > 0])) if payouts else 0.0
+
+    target_achieved_probability = pass_probability
+    target_achieved_days: list[int] = [d for o, d in zip(outcomes, days) if o == "payout"]
+
+    if profile == "personal":
+        target = float(config["payout_threshold"])
+        account_size = float(config["account_size"])
+
+        target_hit_flags: list[bool] = []
+        target_hit_gains: list[float] = []
+        target_achieved_days = []
+        for idx, path in enumerate(paths):
+            hit = any(v >= target for v in path)
+            target_hit_flags.append(hit)
+            if hit:
+                target_achieved_days.append(days[idx] if idx < len(days) else int(config["max_days"]))
+                first_hit_balance = next(v for v in path if v >= target)
+                target_hit_gains.append(float(first_hit_balance - account_size))
+
+        target_achieved_probability = float(np.mean(target_hit_flags)) if target_hit_flags else 0.0
+        pass_probability = target_achieved_probability
+        timeout_probability = max(0.0, 1.0 - pass_probability - blow_probability)
+        expected_payout = float(np.mean(target_hit_gains)) if target_hit_gains else 0.0
 
     return {
         "profile": profile,
@@ -118,13 +145,15 @@ def run_trade_simulation_profile(
         "num_trades": len(clean),
         "pass_probability": round(pass_probability, 4),
         "blow_probability": round(blow_probability, 4),
-        "timeout_probability": round(max(0.0, 1.0 - pass_probability - blow_probability), 4),
+        "timeout_probability": round(timeout_probability, 4),
+        "target_achieved_probability": round(target_achieved_probability, 4),
+        "target_achieved_days": target_achieved_days,
         "expected_payout": round(expected_payout, 2),
         "outcomes": outcomes,
         "payouts": payouts,
-        "balances": [float(v) for v in mc.get("balances", [])],
-        "days": [int(v) for v in mc.get("days", [])],
-        "paths": [list(map(float, p)) for p in mc.get("paths", [])],
+        "balances": balances,
+        "days": days,
+        "paths": paths,
         "trade_sample": [round(v, 2) for v in clean[:3]],
     }
 
