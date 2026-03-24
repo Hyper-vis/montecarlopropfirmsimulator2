@@ -1053,14 +1053,15 @@
     </div><!-- #page-wrap -->
 
     <script>
+        const DEFAULT_REMOTE_API_BASE = "https://passplan-ffjr.onrender.com";
         const API_BASE = (() => {
             const qsBase = new URLSearchParams(window.location.search).get("api");
             if (qsBase) return qsBase.replace(/\/+$/, "");
             const host = window.location.hostname;
             const isRemoteHttp = window.location.protocol.startsWith("http") && host && host !== "127.0.0.1" && host !== "localhost";
-            return isRemoteHttp ? window.location.origin : "http://127.0.0.1:8000";
+            return isRemoteHttp ? DEFAULT_REMOTE_API_BASE : "http://127.0.0.1:8000";
         })();
-        const API_HEALTHZ_URL = "https://passplan-ffjr.onrender.com/healthz";
+        const API_HEALTHZ_URL = API_BASE + "/healthz";
         const COLD_START_STATUSES = new Set([404, 425, 429, 500, 502, 503, 504]);
         const COLD_START_MAX_ATTEMPTS = 5;
         const CLIENT_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
