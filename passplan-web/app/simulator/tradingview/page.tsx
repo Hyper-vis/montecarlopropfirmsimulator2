@@ -42,7 +42,7 @@ export default function TradingViewSimulator() {
                 </div>
             </div>
             <iframe
-                src="/simulator-ui.html?v=20260324&uploadMode=tradingview"
+                src="/simulator-ui.html?v=20260324b&uploadMode=tradingview"
                 style={{ flex: 1, border: 'none', borderRadius: '8px', margin: '0 1rem 1rem 1rem' }}
             />
         </div>

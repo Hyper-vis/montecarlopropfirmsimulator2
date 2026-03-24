@@ -2610,23 +2610,35 @@
         // ─────────────────────────────────────────────────────────────────────────────
         function renderSingleStrategy(data, grid) {
             const prob = data.probabilities || {}, met = data.metrics || {};
+            const profile = (data.metadata || {}).profile;
+            const isPersonal = profile === "mt5_personal";
             // until_payout uses blow_prob + timeout_prob
             // full_period  uses blow_no_payout_prob + timeout_no_pay_prob
             const isFP = currentEp === "full_period";
             const blowVal = isFP ? prob.blow_no_payout_prob : prob.blow_prob;
             const timeoutVal = isFP ? prob.timeout_no_pay_prob : prob.timeout_prob;
-            const blowLabel = isFP ? "Blow (no payout)" : "Blow Probability";
-            const timeoutLabel = isFP ? "Timeout (no payout)" : "Timeout Probability";
+            const successVal = isPersonal
+                ? (prob.target_achieved_prob ?? prob.payout_prob)
+                : prob.payout_prob;
+            const passLabel = isPersonal ? "Target Achieved Probability" : "Pass Probability";
+            const blowLabel = isPersonal
+                ? "Loss-Limit Hit Probability"
+                : (isFP ? "Blow (no payout)" : "Blow Probability");
+            const timeoutLabel = isPersonal
+                ? "Target Not Hit (time limit)"
+                : (isFP ? "Timeout (no payout)" : "Timeout Probability");
+            const payoutLabel = isPersonal ? "Mean Gain on Target Hit" : "Mean Payout";
+            const daysLabel = isPersonal ? "Mean Days to Target" : "Mean Days to Payout";
             // sanity total (should be ~100%)
-            const total = (prob.payout_prob || 0) + (blowVal || 0) + (timeoutVal || 0);
+            const total = (successVal || 0) + (blowVal || 0) + (timeoutVal || 0);
             const totalStr = total > 0 ? ` <span style="font-size:0.7rem;color:#555;">(total ${pct(total)})</span>` : "";
             grid.innerHTML = `
-                ${stat("Pass Probability" + totalStr, pct(prob.payout_prob), colorClass(prob.payout_prob, 0.65, 0.45, "green", "yellow", "red"))}
+                ${stat(passLabel + totalStr, pct(successVal), colorClass(successVal, 0.65, 0.45, "green", "yellow", "red"))}
                 ${stat(blowLabel, pct(blowVal), colorClass(blowVal, 0.35, 0.55, "green", "yellow", "red"))}
                 ${stat(timeoutLabel, pct(timeoutVal))}
                 ${stat("Tier", tierBadge(met.tier_label || "\u2014"))}
-                ${stat("Mean Payout", dollar(met.mean_payout), "green")}
-                ${met.mean_days_to_payout != null ? stat("Mean Days to Payout", fmt1(met.mean_days_to_payout) + "d") : ""}
+                ${stat(payoutLabel, dollar(met.mean_payout), "green")}
+                ${met.mean_days_to_payout != null ? stat(daysLabel, fmt1(met.mean_days_to_payout) + "d") : ""}
                 ${met.e_monthly != null ? stat("Monthly EV (net)", dollar(met.e_monthly), met.e_monthly > 0 ? "green" : "red") : ""}
             `;
             // ── Recency Analysis panel ────────────────────────────────────────
