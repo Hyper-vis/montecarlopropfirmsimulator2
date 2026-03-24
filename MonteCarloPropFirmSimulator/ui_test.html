@@ -414,22 +414,65 @@
         }
 
         .activity-status {
-            font-size: 0.8rem;
+            font-size: 0.78rem;
             min-height: 1.2rem;
-            margin-top: 0.35rem;
-            color: #888;
+            margin-top: 0.45rem;
+            color: #8b93b6;
+            border: 1px solid transparent;
+            border-radius: 8px;
+            padding: 0.35rem 0.55rem;
+            transition: all 0.18s ease;
         }
 
         .activity-status.info {
-            color: #60a5fa;
+            color: #8db9ff;
+            background: rgba(74, 126, 255, 0.1);
+            border-color: rgba(74, 126, 255, 0.24);
         }
 
         .activity-status.warn {
             color: #f59e0b;
+            background: rgba(245, 158, 11, 0.1);
+            border-color: rgba(245, 158, 11, 0.28);
         }
 
         .activity-status.success {
             color: #4ade80;
+            background: rgba(74, 222, 128, 0.1);
+            border-color: rgba(74, 222, 128, 0.26);
+        }
+
+        .progress-meta {
+            display: flex;
+            align-items: center;
+            gap: 0.42rem;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .progress-meta #sp-pct {
+            color: #9fc6ff;
+            min-width: 3ch;
+            text-align: right;
+            font-weight: 700;
+        }
+
+        .progress-warmup {
+            position: relative;
+            width: 100%;
+            transform: none !important;
+            background: linear-gradient(90deg, #1f345f 0%, #3b82f6 40%, #93c5fd 50%, #3b82f6 60%, #1f345f 100%);
+            background-size: 220% 100%;
+            animation: warmupSweep 1.2s linear infinite;
+        }
+
+        @keyframes warmupSweep {
+            0% {
+                background-position: 160% 0;
+            }
+
+            100% {
+                background-position: -60% 0;
+            }
         }
 
         /* -- strategy lists (batch / correlation) -- */
@@ -904,8 +947,8 @@
                         <span id="sp-stage"
                             style="color:#60a5fa;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:72%">Running
                             simulation…</span>
-                        <span style="flex-shrink:0;margin-left:0.5rem"><span id="sp-count">0</span> / <span
-                                id="sp-total">0</span></span>
+                        <span class="progress-meta" style="flex-shrink:0;margin-left:0.5rem"><span
+                                id="sp-count">0</span> / <span id="sp-total">0</span> <span id="sp-pct">0%</span></span>
                     </div>
                     <div style="background:#181b28;border-radius:6px;height:6px;overflow:hidden">
                         <div id="sp-bar"
@@ -1024,6 +1067,8 @@
         let currentEp = "until_payout";
         let chartModeActive = false;
         let lastSimData = null;
+        let singleWarmupTimer = null;
+        let singleWarmupPct = 0;
 
         function setActivityStatus(msg, cls = "info") {
             const el = document.getElementById("activity-status");
@@ -1058,6 +1103,8 @@
             const maxAttempts = cfg.maxAttempts || COLD_START_MAX_ATTEMPTS;
             const retryOnNotFound = cfg.retryOnNotFound !== false;
             const requestTimeoutMs = cfg.requestTimeoutMs || CLIENT_REQUEST_TIMEOUT_MS;
+            const onColdStartRetry = typeof cfg.onColdStartRetry === "function" ? cfg.onColdStartRetry : null;
+            const onColdStartRecovered = typeof cfg.onColdStartRecovered === "function" ? cfg.onColdStartRecovered : null;
             let lastError;
 
             for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -1071,6 +1118,7 @@
                         if (attempt > 1) {
                             setActivityStatus("Server is back online. Continuing…", "success");
                             setTimeout(() => clearActivityStatus(), 1800);
+                            if (onColdStartRecovered) onColdStartRecovered({ attempt, maxAttempts });
                         }
                         return resp;
                     }
@@ -1087,6 +1135,7 @@
                 }
 
                 setActivityStatus(`Server is waking up (attempt ${attempt}/${maxAttempts}). Please be patient…`, "warn");
+                if (onColdStartRetry) onColdStartRetry({ attempt, maxAttempts });
                 const warmed = await waitForApiReady(45000 + attempt * 20000, 2500);
                 if (!warmed && attempt === maxAttempts) break;
                 await sleep(600 * attempt);
@@ -1588,20 +1637,54 @@
         function _showSingleProgress(total, mode) {
             document.getElementById('sp-count').textContent = '0';
             document.getElementById('sp-total').textContent = total;
-            document.getElementById('sp-stage').textContent = mode === 'full_period' ? 'Running full period simulation…' : 'Running until payout simulation…';
-            document.getElementById('sp-bar').style.width = '0%';
+            document.getElementById('sp-pct').textContent = '0%';
+            document.getElementById('sp-stage').textContent = mode === 'full_period' ? 'Preparing full period simulation…' : 'Preparing until payout simulation…';
+            const bar = document.getElementById('sp-bar');
+            bar.classList.remove('progress-warmup');
+            bar.style.width = '0%';
+            singleWarmupPct = 0;
             document.getElementById('single-progress-wrap').style.display = 'block';
         }
 
         function _updateSingleProgress(completed, total) {
+            _stopSingleWarmupPhase();
             document.getElementById('sp-count').textContent = completed;
             document.getElementById('sp-total').textContent = total;
             if (total > 0) {
-                document.getElementById('sp-bar').style.width = Math.round(completed / total * 100) + '%';
+                const pct = Math.round(completed / total * 100);
+                document.getElementById('sp-pct').textContent = `${pct}%`;
+                document.getElementById('sp-stage').textContent = `Running simulations… ${completed.toLocaleString()} / ${total.toLocaleString()}`;
+                document.getElementById('sp-bar').style.width = pct + '%';
+            }
+        }
+
+        function _startSingleWarmupPhase(mode, attempt, maxAttempts) {
+            const bar = document.getElementById('sp-bar');
+            if (!bar) return;
+            bar.classList.add('progress-warmup');
+            if (singleWarmupTimer) return;
+
+            const modeLabel = mode === 'full_period' ? 'full period' : 'until payout';
+            document.getElementById('sp-stage').textContent = `Waking backend (attempt ${attempt}/${maxAttempts}) for ${modeLabel} simulation…`;
+
+            singleWarmupTimer = setInterval(() => {
+                singleWarmupPct = Math.min(78, singleWarmupPct + 1);
+                document.getElementById('sp-pct').textContent = `${singleWarmupPct}%`;
+                document.getElementById('sp-bar').style.width = `${Math.max(18, singleWarmupPct)}%`;
+            }, 650);
+        }
+
+        function _stopSingleWarmupPhase() {
+            const bar = document.getElementById('sp-bar');
+            if (bar) bar.classList.remove('progress-warmup');
+            if (singleWarmupTimer) {
+                clearInterval(singleWarmupTimer);
+                singleWarmupTimer = null;
             }
         }
 
         function _hideSingleProgress() {
+            _stopSingleWarmupPhase();
             document.getElementById('single-progress-wrap').style.display = 'none';
         }
 
@@ -1621,7 +1704,14 @@
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(body),
-                }, { retryOnNotFound: true });
+                }, {
+                    retryOnNotFound: true,
+                    onColdStartRetry: ({ attempt, maxAttempts }) => _startSingleWarmupPhase(mode, attempt, maxAttempts),
+                    onColdStartRecovered: () => {
+                        _stopSingleWarmupPhase();
+                        document.getElementById('sp-stage').textContent = 'Backend ready. Starting simulation…';
+                    },
+                });
                 if (!resp.ok) { _hideSingleProgress(); showError('Server error ' + resp.status); return; }
 
                 const reader = resp.body.getReader();
