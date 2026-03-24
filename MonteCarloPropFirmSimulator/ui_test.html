@@ -1060,6 +1060,7 @@
             const isRemoteHttp = window.location.protocol.startsWith("http") && host && host !== "127.0.0.1" && host !== "localhost";
             return isRemoteHttp ? window.location.origin : "http://127.0.0.1:8000";
         })();
+        const API_HEALTHZ_URL = "https://passplan-ffjr.onrender.com/healthz";
         const COLD_START_STATUSES = new Set([404, 425, 429, 500, 502, 503, 504]);
         const COLD_START_MAX_ATTEMPTS = 5;
         const CLIENT_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
@@ -1089,7 +1090,7 @@
             const deadline = Date.now() + maxWaitMs;
             while (Date.now() < deadline) {
                 try {
-                    const ping = await fetch(API_BASE + "/healthz", { cache: "no-store" });
+                    const ping = await fetch(API_HEALTHZ_URL, { cache: "no-store" });
                     if (ping.ok) return true;
                 } catch {
                     // ignore while deployment is still waking up
@@ -1416,21 +1417,22 @@
                 const isMt5Sheet = /\.(xlsx|xls|xlsm)$/i.test(file.name);
                 const endpoint = isMt5Sheet ? "/upload/mt5" : "/strategies/upload";
                 _showUploadProgress(file.name);
-                setUploadStatus(`Uploading ${i + 1} of ${acceptedFiles.length}: ${file.name}\u2026`, "");
+                setUploadStatus(`Uploading ${i + 1} of ${acceptedFiles.length}: ${file.name}...`, "");
                 try {
-                    setActivityStatus("Checking server status for upload…", "warn");
-                    const warmed = await waitForApiReady(180000, 2500);
-                    if (!warmed) {
-                        throw new Error("Server is still restarting. Please retry in a moment.");
+                    setActivityStatus("Starting upload...", "warn");
+                    const warmed = await waitForApiReady(5000, 1000);
+                    if (warmed) {
+                        clearActivityStatus();
+                    } else {
+                        setActivityStatus("Backend has not confirmed readiness yet. Uploading anyway...", "warn");
                     }
-                    clearActivityStatus();
 
                     const resp = await uploadFileWithProgress(API_BASE + endpoint, file, (pct) => {
                         _updateUploadProgress(pct, file.name);
                         if (pct < 100) {
                             setUploadStatus(`Uploading ${i + 1} of ${acceptedFiles.length}: ${file.name} (${pct}%)`, "");
                         } else {
-                            setUploadStatus(`Uploaded ${file.name}. Processing on server…`, "");
+                            setUploadStatus(`Uploaded ${file.name}. Processing on server...`, "");
                         }
                     });
 
@@ -1463,7 +1465,6 @@
                 onStrategySelectChange();
             }
         }
-
         function setUploadStatus(msg, cls) {
             const el = document.getElementById("upload-status");
             el.textContent = msg;
