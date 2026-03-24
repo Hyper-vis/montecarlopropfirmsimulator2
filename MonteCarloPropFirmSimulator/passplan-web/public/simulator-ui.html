@@ -1029,12 +1029,11 @@
             return DEFAULT_REMOTE_API_BASE;
         })();
         const API_BASE_FALLBACKS = (() => {
-            const out = [window.location.origin];
-            if (API_BASE.endsWith("/api-backend")) {
-                out.push(API_BASE.replace(/\/api-backend$/, ""));
+            const host = window.location.hostname;
+            if (host === "localhost" || host === "127.0.0.1") {
+                return [API_BASE];
             }
-            out.push(API_BASE);
-            return [...new Set(out.filter(Boolean))];
+            return [API_BASE];
         })();
         let ACTIVE_API_BASE = API_BASE;
         let uploadMode = (() => {

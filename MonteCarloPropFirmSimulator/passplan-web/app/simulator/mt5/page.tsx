@@ -194,7 +194,7 @@ export default function MT5Simulator() {
 
             <iframe
                 ref={iframeRef}
-                src="/simulator-ui.html?v=20260324e&uploadMode=mt5"
+                src="/simulator-ui.html?v=20260324f&uploadMode=mt5"
                 onLoad={syncConfigToIframe}
                 style={{ flex: 1, border: 'none', borderRadius: '8px', margin: '0.5rem 1rem 1rem 1rem' }}
             />

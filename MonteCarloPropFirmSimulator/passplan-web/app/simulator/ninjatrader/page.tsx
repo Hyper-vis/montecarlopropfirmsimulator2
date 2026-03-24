@@ -42,7 +42,7 @@ export default function NinjaTraderSimulator() {
                 </div>
             </div>
             <iframe
-                src="/simulator-ui.html?v=20260324e&uploadMode=ninjatrader"
+                src="/simulator-ui.html?v=20260324f&uploadMode=ninjatrader"
                 style={{ flex: 1, border: 'none', borderRadius: '8px', margin: '0 1rem 1rem 1rem' }}
             />
         </div>
