@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Monte Carlo Prop Firm Simulator</title>
+    <title>ProfitPlan Prop Firm Simulator</title>
     <style>
         *,
         *::before,
@@ -712,8 +712,7 @@
     <div id="page-wrap">
         <div id="left-panel">
 
-            <h1>Monte Carlo Prop Firm Simulator</h1>
-            <p class="subtitle">API test UI &mdash; backed by api_server.py on localhost:8000</p>
+            <h1>ProfitPlan Prop Firm Simulator</h1>
 
             <!-- --- Upload card --- -->
             <div class="card">
@@ -736,7 +735,7 @@
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:1.1rem">
                     <div class="card-title" style="margin-bottom:0">Simulation</div>
                     <button class="chart-toggle-btn" id="chart-toggle-btn" onclick="toggleChartMode()"
-                        title="Show Monte Carlo equity path visualization">&#128202; Chart View</button>
+                        title="Show ProfitPlan equity path visualization">&#128202; Chart View</button>
                 </div>
 
                 <!-- Endpoint selector tabs -->
@@ -914,9 +913,6 @@
                 <div id="common-sims-wrap">
                     <label for="n_sims">Simulations</label>
                     <input id="n_sims" type="number" min="1" value="5000" />
-
-                    <label for="seed">Seed (optional &mdash; leave blank for random)</label>
-                    <input id="seed" type="number" placeholder="e.g. 42" />
                 </div>
 
                 <div class="run-row">
@@ -998,7 +994,7 @@
                     </div>
                 </div>
                 <canvas id="mc-canvas"></canvas>
-                <div style="font-size:0.7rem;color:#444;margin-top:0.4rem;text-align:right">Monte Carlo &mdash; up to
+                <div style="font-size:0.7rem;color:#444;margin-top:0.4rem;text-align:right">ProfitPlan &mdash; up to
                     150 paths rendered</div>
             </div>
 
@@ -1506,8 +1502,7 @@
         // -- Build request body -------------------------------------------------
         function buildBody() {
             const n_sims = parseInt(document.getElementById("n_sims").value) || 5000;
-            const seedRaw = document.getElementById("seed").value.trim();
-            const seed = seedRaw !== "" ? parseInt(seedRaw) : null;
+            const seed = null;
             if (currentEp === "until_payout" || currentEp === "full_period") {
                 return withMt5PersonalInputs(resolvedSingleBody(n_sims, seed));
             }
@@ -1544,8 +1539,7 @@
             if (!checked.length) throw new Error("Select at least one strategy to compare.");
             const n_sims = parseInt(document.getElementById("rescue-n-sims").value) || 10000;
             const max_days = parseInt(document.getElementById("rescue-max-days").value) || 90;
-            const seedRaw = document.getElementById("seed").value.trim();
-            const seed = seedRaw !== "" ? parseInt(seedRaw) : null;
+            const seed = null;
             return {
                 strategy_ids: checked.map(c => c.value),
                 current_balance: balance,
