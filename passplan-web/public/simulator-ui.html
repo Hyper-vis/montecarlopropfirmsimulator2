@@ -1027,6 +1027,15 @@
 
             return window.location.origin + "/api-backend";
         })();
+        const API_BASE_FALLBACKS = (() => {
+            const out = [window.location.origin];
+            if (API_BASE.endsWith("/api-backend")) {
+                out.push(API_BASE.replace(/\/api-backend$/, ""));
+            }
+            out.push(API_BASE);
+            return [...new Set(out.filter(Boolean))];
+        })();
+        let ACTIVE_API_BASE = API_BASE;
         let uploadMode = (() => {
             const m = new URLSearchParams(window.location.search).get("uploadMode");
             return m === "mt5" ? "mt5" : m === "ninjatrader" ? "ninjatrader" : "tradingview";
@@ -1049,6 +1058,30 @@
 
         const _sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+        function _joinApi(base, path) {
+            return `${base.replace(/\/$/, "")}/${String(path || "").replace(/^\//, "")}`;
+        }
+
+        function _apiCandidateBases() {
+            return [...new Set([ACTIVE_API_BASE, ...API_BASE_FALLBACKS].filter(Boolean))];
+        }
+
+        function _candidateUrls(url) {
+            if (!/^https?:\/\//i.test(url)) {
+                return _apiCandidateBases().map(base => _joinApi(base, url));
+            }
+            if (!url.startsWith(API_BASE)) {
+                return [url];
+            }
+            const suffix = url.slice(API_BASE.length);
+            return _apiCandidateBases().map(base => `${base}${suffix}`);
+        }
+
+        function _setActiveBaseFromUrl(url) {
+            const matched = _apiCandidateBases().find(base => url.startsWith(base));
+            if (matched) ACTIVE_API_BASE = matched;
+        }
+
         async function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -1068,24 +1101,24 @@
             let attempt = 0;
             while (Date.now() - startedAt < API_WARMUP_MAX_WAIT_MS) {
                 attempt += 1;
+                const candidates = _apiCandidateBases();
                 if (onStatus) {
-                    onStatus(`Waking backend (attempt ${attempt})… this can take up to ~1 min on free Render.`);
+                    onStatus(`Waking backend (attempt ${attempt})… checking ${candidates.length} route${candidates.length > 1 ? 's' : ''}.`);
                 }
-                try {
-                    const r = await fetchWithTimeout(`${API_BASE}/healthz`, {
-                        method: 'GET',
-                        headers: { 'Cache-Control': 'no-cache' },
-                    }, API_WARMUP_REQUEST_TIMEOUT_MS);
-                    if (r.ok) {
-                        if (onStatus) onStatus('Backend is awake.');
-                        return true;
+                for (const base of candidates) {
+                    try {
+                        const r = await fetchWithTimeout(_joinApi(base, "/healthz"), {
+                            method: 'GET',
+                            headers: { 'Cache-Control': 'no-cache' },
+                        }, API_WARMUP_REQUEST_TIMEOUT_MS);
+                        if (r.ok) {
+                            ACTIVE_API_BASE = base;
+                            if (onStatus) onStatus(`Backend is awake via ${new URL(base).hostname}.`);
+                            return true;
+                        }
+                    } catch {
+                        // Keep polling until timeout.
                     }
-                    if (!_isWarmupRetryableStatus(r.status)) {
-                        if (onStatus) onStatus(`Backend responded (${r.status}). Continuing…`);
-                        return true;
-                    }
-                } catch {
-                    // Keep polling until timeout.
                 }
                 await _sleep(API_WARMUP_POLL_MS);
             }
@@ -1093,15 +1126,51 @@
         }
 
         async function fetchWithWarmup(url, options = {}, onStatus) {
+            const candidateUrls = _candidateUrls(url);
             try {
-                const first = await fetchWithTimeout(url, options);
-                if (first.ok || !_isWarmupRetryableStatus(first.status)) return first;
+                for (const target of candidateUrls) {
+                    const first = await fetchWithTimeout(target, options);
+                    if (first.ok || !_isWarmupRetryableStatus(first.status)) {
+                        _setActiveBaseFromUrl(target);
+                        return first;
+                    }
+                }
             } catch {
                 // Fall through to warmup.
             }
 
             await ensureApiAwake(onStatus);
-            return await fetchWithTimeout(url, options);
+            for (const target of _candidateUrls(url)) {
+                try {
+                    const retry = await fetchWithTimeout(target, options);
+                    _setActiveBaseFromUrl(target);
+                    return retry;
+                } catch {
+                    // Try next candidate.
+                }
+            }
+            throw new Error("Could not reach backend after warmup attempts.");
+        }
+
+        async function postFormWithProgressWithWarmup(endpointPath, form, onProgress, onStatus) {
+            await ensureApiAwake(onStatus);
+            let lastError = null;
+
+            for (const base of _apiCandidateBases()) {
+                const url = _joinApi(base, endpointPath);
+                try {
+                    const resp = await postFormWithProgress(url, form, onProgress);
+                    if (resp.ok || !_isWarmupRetryableStatus(resp.status)) {
+                        ACTIVE_API_BASE = base;
+                        return resp;
+                    }
+                } catch (e) {
+                    lastError = e;
+                }
+            }
+
+            if (lastError) throw lastError;
+            throw new Error(`Could not reach ${endpointPath} endpoint.`);
         }
 
         window.addEventListener("message", (event) => {
@@ -1430,9 +1499,9 @@
             _showUploadProgress(`Uploading ${file.name}…`);
             try {
                 await ensureApiAwake(msg => _updateUploadProgress(0, file.size, msg));
-                const resp = await postFormWithProgress(API_BASE + "/upload/ninjatrader", form, (loaded, total) => {
+                const resp = await postFormWithProgressWithWarmup("/upload/ninjatrader", form, (loaded, total) => {
                     _updateUploadProgress(loaded, total, `Uploading ${file.name}…`);
-                });
+                }, msg => _updateUploadProgress(0, file.size, msg));
                 _updateUploadProgress(file.size, file.size, `Server is analyzing ${file.name}…`);
                 const data = resp.data || {};
                 if (!resp.ok || data.error) {
@@ -1453,7 +1522,7 @@
                     : `Uploaded${tradesText}. Select it below and press Run Simulation.`;
                 setUploadStatus(doneMsg, "success");
             } catch (e) {
-                setUploadStatus("Could not reach /upload/ninjatrader endpoint.", "error");
+                setUploadStatus(`Could not reach /upload/ninjatrader endpoint. ${e.message || ""}`.trim(), "error");
             } finally {
                 _hideUploadProgress();
             }
@@ -1499,9 +1568,9 @@
             _showUploadProgress(`Uploading ${file.name}…`);
             try {
                 await ensureApiAwake(msg => _updateUploadProgress(0, file.size, msg));
-                const resp = await postFormWithProgress(API_BASE + "/upload/mt5", form, (loaded, total) => {
+                const resp = await postFormWithProgressWithWarmup("/upload/mt5", form, (loaded, total) => {
                     _updateUploadProgress(loaded, total, `Uploading ${file.name}…`);
-                });
+                }, msg => _updateUploadProgress(0, file.size, msg));
                 _updateUploadProgress(file.size, file.size, `Server is analyzing ${file.name}…`);
                 const data = resp.data || {};
                 if (!resp.ok || data.error) {
@@ -1522,7 +1591,7 @@
                     : `Uploaded${tradesText}. Select it below and press Run Simulation.`;
                 setUploadStatus(doneMsg, "success");
             } catch (e) {
-                setUploadStatus("Could not reach /upload/mt5 endpoint.", "error");
+                setUploadStatus(`Could not reach /upload/mt5 endpoint. ${e.message || ""}`.trim(), "error");
             } finally {
                 _hideUploadProgress();
             }
@@ -1572,6 +1641,7 @@
                 const xhr = new XMLHttpRequest();
                 xhr.open("POST", url, true);
                 xhr.responseType = "text";
+                xhr.timeout = API_WARMUP_MAX_WAIT_MS;
                 xhr.upload.onprogress = (evt) => {
                     if (evt.lengthComputable && onProgress) onProgress(evt.loaded, evt.total);
                 };
@@ -1581,6 +1651,7 @@
                     resolve({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, data });
                 };
                 xhr.onerror = () => reject(new Error("Network error during upload."));
+                xhr.ontimeout = () => reject(new Error("Upload request timed out while waiting for backend."));
                 xhr.send(form);
             });
         }
