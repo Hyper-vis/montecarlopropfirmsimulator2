@@ -413,6 +413,25 @@
             color: #f87171;
         }
 
+        .activity-status {
+            font-size: 0.8rem;
+            min-height: 1.2rem;
+            margin-top: 0.35rem;
+            color: #888;
+        }
+
+        .activity-status.info {
+            color: #60a5fa;
+        }
+
+        .activity-status.warn {
+            color: #f59e0b;
+        }
+
+        .activity-status.success {
+            color: #4ade80;
+        }
+
         /* -- strategy lists (batch / correlation) -- */
         .strategy-list {
             display: flex;
@@ -688,20 +707,33 @@
         <div id="left-panel">
 
             <h1>Monte Carlo Prop Firm Simulator</h1>
-                <p class="subtitle" id="api-subtitle">API test UI</p>
+            <p class="subtitle" id="api-subtitle">API test UI</p>
 
             <!-- --- Upload card --- -->
             <div class="card">
                 <div class="card-title">Upload Strategy CSV</div>
                 <div class="upload-area" id="upload-area">
-                    <input type="file" id="file-input" accept=".csv" multiple />
+                    <input type="file" id="file-input" accept=".csv,.xlsx,.xls,.xlsm" multiple />
                     <div class="upload-area-label">
-                        Drag &amp; drop one or more <span>.csv</span> files here, or
+                        Drag &amp; drop one or more <span>.csv</span> or <span>MT5 Excel</span> files here, or
                         <span onclick="document.getElementById('file-input').click()"
                             style="pointer-events:all;cursor:pointer">browse</span>
                     </div>
                 </div>
                 <div class="upload-status" id="upload-status"></div>
+                <div id="upload-progress-wrap" style="display:none;padding:0.2rem 0 0.2rem">
+                    <div
+                        style="display:flex;justify-content:space-between;align-items:center;font-size:0.75rem;color:#888;margin-bottom:0.45rem">
+                        <span id="up-file"
+                            style="color:#4a7eff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:72%"></span>
+                        <span style="flex-shrink:0;margin-left:0.5rem"><span id="up-pct">0</span>%</span>
+                    </div>
+                    <div style="background:#181b28;border-radius:6px;height:6px;overflow:hidden">
+                        <div id="up-bar"
+                            style="background:linear-gradient(90deg,#4a7eff,#60a5fa);height:100%;width:0%;transition:width 0.2s ease;border-radius:6px">
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <!-- --- Simulation card --- -->
@@ -863,6 +895,24 @@
                 </div>
 
                 <div id="error-box"></div>
+                <div id="activity-status" class="activity-status"></div>
+
+                <!-- Single simulation streaming progress bar -->
+                <div id="single-progress-wrap" style="display:none;padding:0.5rem 0 0.2rem">
+                    <div
+                        style="display:flex;justify-content:space-between;align-items:center;font-size:0.75rem;color:#888;margin-bottom:0.45rem">
+                        <span id="sp-stage"
+                            style="color:#60a5fa;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:72%">Running
+                            simulation…</span>
+                        <span style="flex-shrink:0;margin-left:0.5rem"><span id="sp-count">0</span> / <span
+                                id="sp-total">0</span></span>
+                    </div>
+                    <div style="background:#181b28;border-radius:6px;height:6px;overflow:hidden">
+                        <div id="sp-bar"
+                            style="background:linear-gradient(90deg,#4a7eff,#60a5fa);height:100%;width:0%;transition:width 0.3s ease;border-radius:6px">
+                        </div>
+                    </div>
+                </div>
 
                 <!-- Optimizer streaming progress bar -->
                 <div id="opt-progress-wrap" style="display:none;padding:0.5rem 0 0.2rem">
@@ -968,17 +1018,29 @@
             return isRemoteHttp ? window.location.origin : "http://127.0.0.1:8000";
         })();
         const COLD_START_STATUSES = new Set([404, 425, 429, 500, 502, 503, 504]);
-        const COLD_START_MAX_ATTEMPTS = 3;
+        const COLD_START_MAX_ATTEMPTS = 5;
+        const CLIENT_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
         let registeredStrategies = [];
         let currentEp = "until_payout";
         let chartModeActive = false;
         let lastSimData = null;
 
+        function setActivityStatus(msg, cls = "info") {
+            const el = document.getElementById("activity-status");
+            if (!el) return;
+            el.textContent = msg || "";
+            el.className = "activity-status" + (msg ? ` ${cls}` : "");
+        }
+
+        function clearActivityStatus() {
+            setActivityStatus("");
+        }
+
         function sleep(ms) {
             return new Promise(resolve => setTimeout(resolve, ms));
         }
 
-        async function waitForApiReady(maxWaitMs = 90000, pollMs = 2500) {
+        async function waitForApiReady(maxWaitMs = 180000, pollMs = 2500) {
             const deadline = Date.now() + maxWaitMs;
             while (Date.now() < deadline) {
                 try {
@@ -995,12 +1057,23 @@
         async function fetchWithColdStart(url, options = {}, cfg = {}) {
             const maxAttempts = cfg.maxAttempts || COLD_START_MAX_ATTEMPTS;
             const retryOnNotFound = cfg.retryOnNotFound !== false;
+            const requestTimeoutMs = cfg.requestTimeoutMs || CLIENT_REQUEST_TIMEOUT_MS;
             let lastError;
 
             for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                let timeoutId;
                 try {
-                    const resp = await fetch(url, options);
-                    if (resp.ok) return resp;
+                    const controller = new AbortController();
+                    timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
+                    const resp = await fetch(url, { ...options, signal: controller.signal });
+                    clearTimeout(timeoutId);
+                    if (resp.ok) {
+                        if (attempt > 1) {
+                            setActivityStatus("Server is back online. Continuing…", "success");
+                            setTimeout(() => clearActivityStatus(), 1800);
+                        }
+                        return resp;
+                    }
 
                     const canRetryStatus = COLD_START_STATUSES.has(resp.status) &&
                         (resp.status !== 404 || retryOnNotFound);
@@ -1009,9 +1082,12 @@
                 } catch (err) {
                     lastError = err;
                     if (attempt === maxAttempts) throw err;
+                } finally {
+                    if (timeoutId) clearTimeout(timeoutId);
                 }
 
-                const warmed = await waitForApiReady(30000 + attempt * 15000, 2500);
+                setActivityStatus(`Server is waking up (attempt ${attempt}/${maxAttempts}). Please be patient…`, "warn");
+                const warmed = await waitForApiReady(45000 + attempt * 20000, 2500);
                 if (!warmed && attempt === maxAttempts) break;
                 await sleep(600 * attempt);
             }
@@ -1040,12 +1116,59 @@
             try {
                 const r = await fetchWithColdStart(API_BASE + "/strategies", {}, { retryOnNotFound: true });
                 registeredStrategies = r.ok ? await readJsonSafe(r) : [];
+                clearActivityStatus();
             } catch { registeredStrategies = []; }
             populateStrategyDropdown();
             populateBatchList();
             populateCorrList();
             populateOptList();
             populateRescueList();
+        }
+
+        function _showUploadProgress(fileName) {
+            document.getElementById("up-file").textContent = fileName;
+            document.getElementById("up-pct").textContent = "0";
+            document.getElementById("up-bar").style.width = "0%";
+            document.getElementById("upload-progress-wrap").style.display = "block";
+        }
+
+        function _updateUploadProgress(pct, fileName) {
+            if (fileName) document.getElementById("up-file").textContent = fileName;
+            document.getElementById("up-pct").textContent = String(pct);
+            document.getElementById("up-bar").style.width = `${pct}%`;
+        }
+
+        function _hideUploadProgress() {
+            document.getElementById("upload-progress-wrap").style.display = "none";
+        }
+
+        async function uploadFileWithProgress(url, file, onProgress) {
+            return new Promise((resolve, reject) => {
+                const xhr = new XMLHttpRequest();
+                xhr.open("POST", url, true);
+                xhr.responseType = "text";
+                xhr.timeout = CLIENT_REQUEST_TIMEOUT_MS;
+
+                xhr.upload.onprogress = (evt) => {
+                    if (!evt.lengthComputable) return;
+                    const pct = Math.min(100, Math.max(0, Math.round((evt.loaded / evt.total) * 100)));
+                    onProgress(pct);
+                };
+
+                xhr.onload = () => {
+                    let data = {};
+                    try { data = xhr.responseText ? JSON.parse(xhr.responseText) : {}; }
+                    catch { data = { error: `HTTP ${xhr.status}: ${(xhr.responseText || "").slice(0, 240)}` }; }
+                    resolve({ ok: xhr.status >= 200 && xhr.status < 300, status: xhr.status, data });
+                };
+
+                xhr.onerror = () => reject(new Error("Network error during upload."));
+                xhr.ontimeout = () => reject(new Error("Upload timed out while waiting for server response."));
+
+                const form = new FormData();
+                form.append("file", file);
+                xhr.send(form);
+            });
         }
 
         function populateStrategyDropdown() {
@@ -1229,38 +1352,58 @@
         uploadArea.addEventListener("click", e => { if (e.target.tagName !== "INPUT") fileInput.click(); });
 
         async function handleUploadMany(files) {
-            const csvFiles = files.filter(f => f.name.toLowerCase().endsWith(".csv"));
-            const skipped = files.length - csvFiles.length;
-            if (!csvFiles.length) { setUploadStatus("Error: No CSV files found in selection.", "error"); return; }
+            const acceptedFiles = files.filter(f => /\.(csv|xlsx|xls|xlsm)$/i.test(f.name));
+            const skipped = files.length - acceptedFiles.length;
+            if (!acceptedFiles.length) {
+                setUploadStatus("Error: No supported files found (.csv, .xlsx, .xls, .xlsm).", "error");
+                return;
+            }
 
             let lastId = null;
             const errors = [];
             let duplicates = 0;
-            for (let i = 0; i < csvFiles.length; i++) {
-                const file = csvFiles[i];
-                setUploadStatus(`Uploading ${i + 1} of ${csvFiles.length}: ${file.name}\u2026`, "");
-                const form = new FormData();
-                form.append("file", file);
+            for (let i = 0; i < acceptedFiles.length; i++) {
+                const file = acceptedFiles[i];
+                const isMt5Sheet = /\.(xlsx|xls|xlsm)$/i.test(file.name);
+                const endpoint = isMt5Sheet ? "/upload/mt5" : "/strategies/upload";
+                _showUploadProgress(file.name);
+                setUploadStatus(`Uploading ${i + 1} of ${acceptedFiles.length}: ${file.name}\u2026`, "");
                 try {
-                    const resp = await fetchWithColdStart(API_BASE + "/strategies/upload", { method: "POST", body: form }, { retryOnNotFound: true });
-                    const data = await readJsonSafe(resp);
-                    const err = apiErrorMessage(resp, data);
+                    setActivityStatus("Checking server status for upload…", "warn");
+                    const warmed = await waitForApiReady(180000, 2500);
+                    if (!warmed) {
+                        throw new Error("Server is still restarting. Please retry in a moment.");
+                    }
+                    clearActivityStatus();
+
+                    const resp = await uploadFileWithProgress(API_BASE + endpoint, file, (pct) => {
+                        _updateUploadProgress(pct, file.name);
+                        if (pct < 100) {
+                            setUploadStatus(`Uploading ${i + 1} of ${acceptedFiles.length}: ${file.name} (${pct}%)`, "");
+                        } else {
+                            setUploadStatus(`Uploaded ${file.name}. Processing on server…`, "");
+                        }
+                    });
+
+                    const err = (!resp.ok && (resp.data?.error || `HTTP ${resp.status}`)) || resp.data?.error || "";
                     if (err) { errors.push(`${file.name}: ${err}`); continue; }
+                    const data = resp.data;
                     if (data.duplicate) duplicates++;
                     lastId = data.strategy_id;
                 } catch (e) { errors.push(`${file.name}: ${e.message}`); }
             }
 
             await loadStrategies();
+            _hideUploadProgress();
 
             if (errors.length) {
                 setUploadStatus(`Done with ${errors.length} error(s): ${errors.join(" | ")}`, "error");
             } else {
                 const parts = [];
-                const newCount = csvFiles.length - duplicates;
+                const newCount = acceptedFiles.length - duplicates;
                 if (newCount > 0) parts.push(`${newCount} new file${newCount > 1 ? "s" : ""} uploaded`);
                 if (duplicates > 0) parts.push(`${duplicates} duplicate${duplicates > 1 ? "s" : ""} skipped`);
-                if (skipped > 0) parts.push(`${skipped} non-CSV file${skipped > 1 ? "s" : ""} ignored`);
+                if (skipped > 0) parts.push(`${skipped} unsupported file${skipped > 1 ? "s" : ""} ignored`);
                 setUploadStatus(`\u2713 ${parts.join(", ")}`, "success");
             }
 
@@ -1416,6 +1559,10 @@
             if (currentEp === "batch") { runBatchStreaming(); return; }
             if (currentEp === "optimizer") { runOptimizerStreaming(); return; }
             if (currentEp === "rescue") { runRescue(); return; }
+            if (currentEp === "until_payout" || currentEp === "full_period") {
+                runSingleStreaming(currentEp);
+                return;
+            }
             hideError(); hideResults();
             let body;
             try { body = buildBody(); } catch (e) { showError(e.message); return; }
@@ -1431,10 +1578,84 @@
                 const data = await readJsonSafe(resp);
                 const err = apiErrorMessage(resp, data);
                 if (err) { showError(err); return; }
+                clearActivityStatus();
                 renderResults(data);
             } catch (e) {
                 showError("Could not reach the API server. Is it running?\n\n" + e.message);
             } finally { btn.disabled = false; spinner.style.display = "none"; }
+        }
+
+        function _showSingleProgress(total, mode) {
+            document.getElementById('sp-count').textContent = '0';
+            document.getElementById('sp-total').textContent = total;
+            document.getElementById('sp-stage').textContent = mode === 'full_period' ? 'Running full period simulation…' : 'Running until payout simulation…';
+            document.getElementById('sp-bar').style.width = '0%';
+            document.getElementById('single-progress-wrap').style.display = 'block';
+        }
+
+        function _updateSingleProgress(completed, total) {
+            document.getElementById('sp-count').textContent = completed;
+            document.getElementById('sp-total').textContent = total;
+            if (total > 0) {
+                document.getElementById('sp-bar').style.width = Math.round(completed / total * 100) + '%';
+            }
+        }
+
+        function _hideSingleProgress() {
+            document.getElementById('single-progress-wrap').style.display = 'none';
+        }
+
+        async function runSingleStreaming(mode) {
+            hideError(); hideResults();
+            let body;
+            try { body = buildBody(); } catch (e) { showError(e.message); return; }
+            const btn = document.getElementById('run-btn');
+            const spinner = document.getElementById('spinner');
+            btn.disabled = true;
+            spinner.style.display = 'block';
+            _showSingleProgress(body.n_sims || 0, mode);
+
+            const streamPath = mode === 'full_period' ? '/analyze/full_period/stream' : '/analyze/until_payout/stream';
+            try {
+                const resp = await fetchWithColdStart(API_BASE + streamPath, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                }, { retryOnNotFound: true });
+                if (!resp.ok) { _hideSingleProgress(); showError('Server error ' + resp.status); return; }
+
+                const reader = resp.body.getReader();
+                const decoder = new TextDecoder();
+                let buf = '';
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    buf += decoder.decode(value, { stream: true });
+                    const lines = buf.split('\n');
+                    buf = lines.pop();
+                    for (const line of lines) {
+                        if (!line.startsWith('data: ')) continue;
+                        let msg;
+                        try { msg = JSON.parse(line.slice(6)); } catch { continue; }
+                        if (msg.type === 'progress') {
+                            _updateSingleProgress(msg.completed, msg.total);
+                        } else if (msg.type === 'done') {
+                            _hideSingleProgress();
+                            clearActivityStatus();
+                            renderResults(msg.data);
+                        } else if (msg.type === 'error') {
+                            _hideSingleProgress();
+                            showError(msg.message);
+                        }
+                    }
+                }
+            } catch (e) {
+                _hideSingleProgress();
+                showError('Could not reach the API server. Is it running?\n\n' + e.message);
+            } finally {
+                btn.disabled = false;
+                spinner.style.display = 'none';
+            }
         }
 
         // -- Render results -----------------------------------------------------
@@ -1652,7 +1873,7 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(body),
                 }, { retryOnNotFound: true });
-                if (!resp.ok) { showError('Server error ' + resp.status); return; }
+                if (!resp.ok) { _hideOptProgress(); showError('Server error ' + resp.status); return; }
                 const reader = resp.body.getReader();
                 const decoder = new TextDecoder();
                 let buf = '';
@@ -1672,6 +1893,7 @@
                             _updateOptProgress(msg.completed, msg.total);
                         } else if (msg.type === 'done') {
                             _hideOptProgress();
+                            clearActivityStatus();
                             renderResults(msg.data);
                         } else if (msg.type === 'error') {
                             _hideOptProgress();
@@ -1723,7 +1945,7 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(body),
                 }, { retryOnNotFound: true });
-                if (!resp.ok) { showError('Server error ' + resp.status); return; }
+                if (!resp.ok) { _hideBatchProgress(); showError('Server error ' + resp.status); return; }
                 const reader = resp.body.getReader();
                 const decoder = new TextDecoder();
                 let buf = '';
@@ -1741,6 +1963,7 @@
                             _updateBatchProgress(msg.completed, msg.total, msg.file);
                         } else if (msg.type === 'done') {
                             _hideBatchProgress();
+                            clearActivityStatus();
                             renderResults(msg.data);
                         } else if (msg.type === 'error') {
                             _hideBatchProgress();
@@ -1771,6 +1994,7 @@
                 const data = await readJsonSafe(resp);
                 const err = apiErrorMessage(resp, data);
                 if (err) { showError(err + ''); return; }
+                clearActivityStatus();
                 if (!data.length) {
                     showError('No leaderboard data yet for this mode. Run some simulations first.');
                     return;
@@ -1912,6 +2136,7 @@
                 const data = await readJsonSafe(resp);
                 const err = apiErrorMessage(resp, data);
                 if (err) { showError(err); return; }
+                clearActivityStatus();
                 document.body.classList.add('rescue-mode');
                 const card = document.getElementById('rescue-panel-card');
                 card.style.display = 'block';
@@ -2463,14 +2688,14 @@
                 const recentPctStr = rec.recent_pass_probability != null ? pct(rec.recent_pass_probability) : '\u2014';
                 const lookbackDays = rec.lookback_days ?? 30;
                 const windowLabel = `Recent (last ${lookbackDays}d)`;
-                const nTrades    = rec.recent_n_trades ?? rec.recent_window_size;
-                const nActive    = rec.n_active_days ?? rec.recent_n_days;
-                const fullT      = rec.full_n_trades;
-                const lowWarn    = rec.low_sample_warning === true;
-                const tradeInfo  = (nTrades != null && fullT != null)
+                const nTrades = rec.recent_n_trades ?? rec.recent_window_size;
+                const nActive = rec.n_active_days ?? rec.recent_n_days;
+                const fullT = rec.full_n_trades;
+                const lowWarn = rec.low_sample_warning === true;
+                const tradeInfo = (nTrades != null && fullT != null)
                     ? `last ${lookbackDays} days &middot; ${nTrades} trade${nTrades === 1 ? '' : 's'} &middot; ${nActive ?? '?'} active days`
                     : (rec.recent_n_days != null && rec.full_n_days != null)
-                    ? `${rec.recent_n_days} of ${rec.full_n_days} trading days` : '';
+                        ? `${rec.recent_n_days} of ${rec.full_n_days} trading days` : '';
                 const lowWarnHtml = lowWarn
                     ? `<div style="font-size:0.72rem;color:#f59e0b;margin-top:0.4rem">&#9888; Low sample (&lt;${nTrades} trades in window) — estimate has high variance.</div>`
                     : '';
@@ -2844,6 +3069,7 @@
             const rc = document.getElementById("rescue-panel-card");
             if (rc) rc.style.display = "none";
             document.body.classList.remove('rescue-mode');
+            _hideSingleProgress();
         }
 
         // -- Init ---------------------------------------------------------------
